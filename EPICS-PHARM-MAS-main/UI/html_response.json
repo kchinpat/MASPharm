@@ -1,0 +1,57 @@
+{
+    "data": {
+        "spl_version": 20,
+        "published_date": "Aug 30, 2023",
+        "media": [
+            {
+                "mime_type": "image/jpeg",
+                "url": "https://dailymed.nlm.nih.gov/dailymed/image.cfm?setid=13930c94-d83a-414f-be35-b1fef35f738d&name=alprazolam-01.jpg",
+                "name": "alprazolam-01.jpg"
+            },
+            {
+                "mime_type": "image/jpeg",
+                "url": "https://dailymed.nlm.nih.gov/dailymed/image.cfm?setid=13930c94-d83a-414f-be35-b1fef35f738d&name=alprazolam-02.jpg",
+                "name": "alprazolam-02.jpg"
+            },
+            {
+                "mime_type": "image/jpeg",
+                "url": "https://dailymed.nlm.nih.gov/dailymed/image.cfm?setid=13930c94-d83a-414f-be35-b1fef35f738d&name=alprazolam-03.jpg",
+                "name": "alprazolam-03.jpg"
+            },
+            {
+                "mime_type": "image/jpeg",
+                "url": "https://dailymed.nlm.nih.gov/dailymed/image.cfm?setid=13930c94-d83a-414f-be35-b1fef35f738d&name=alprazolam-04.jpg",
+                "name": "alprazolam-04.jpg"
+            },
+            {
+                "mime_type": "image/jpeg",
+                "url": "https://dailymed.nlm.nih.gov/dailymed/image.cfm?setid=13930c94-d83a-414f-be35-b1fef35f738d&name=alprazolam-05.jpg",
+                "name": "alprazolam-05.jpg"
+            },
+            {
+                "mime_type": "image/jpeg",
+                "url": "https://dailymed.nlm.nih.gov/dailymed/image.cfm?setid=13930c94-d83a-414f-be35-b1fef35f738d&name=alprazolam-06.jpg",
+                "name": "alprazolam-06.jpg"
+            },
+            {
+                "mime_type": "image/jpeg",
+                "url": "https://dailymed.nlm.nih.gov/dailymed/image.cfm?setid=13930c94-d83a-414f-be35-b1fef35f738d&name=alprazolam-07.jpg",
+                "name": "alprazolam-07.jpg"
+            }
+        ],
+        "title": "ALPRAZOLAM TABLET [GREENSTONE LLC]",
+        "setid": "13930c94-d83a-414f-be35-b1fef35f738d"
+    },
+    "metadata": {
+        "db_published_date": "Mar 25, 2025 07:18:35PM EST",
+        "elements_per_page": 100,
+        "current_url": "https://dailymed.nlm.nih.gov/dailymed/services/v2/spls/13930c94-d83a-414f-be35-b1fef35f738d/media.json",
+        "next_page_url": "null",
+        "total_elements": 7,
+        "total_pages": 1,
+        "current_page": 1,
+        "previous_page": "null",
+        "previous_page_url": "null",
+        "next_page": "null"
+    }
+}

@@ -1,0 +1,40 @@
+[
+    {
+        "cabinet_number": 1,
+        "fill_status": true,
+        "quantity": 1,
+        "current_stored_medecine": {
+            "generic_name": "Clotrimazole",
+            "labeler_name": "NuCare Pharmaceuticals, Inc.",
+            "brand_name": "clotrimazole",
+            "expiry_date": "20251231",
+            "ndc": "368071339536",
+            "description": "30 g in 1 BOX (68071-3395-3)"
+        }
+    },
+    {
+        "cabinet_number": 2,
+        "fill_status": true,
+        "quantity": 6,
+        "current_stored_medecine": {
+            "generic_name": "Warfarin Sodium",
+            "labeler_name": "Golden State Medical Supply, Inc.",
+            "brand_name": "Warfarin Sodium",
+            "expiry_date": "20251231",
+            "ndc": "351407784018",
+            "description": "100 TABLET in 1 BOTTLE (51407-784-01)"
+        }
+    },
+    {
+        "cabinet_number": 3,
+        "fill_status": false,
+        "quantity": 0,
+        "current_stored_medecine": {}
+    },
+    {
+        "cabinet_number": 4,
+        "fill_status": false,
+        "quantity": 0,
+        "current_stored_medecine": {}
+    }
+]

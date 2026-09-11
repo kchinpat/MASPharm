@@ -1,0 +1,43 @@
+[
+    {
+        "cabinet_number": 1,
+        "fill_status": true,
+        "current_stored_medecine": {
+            "generic_name": "dfkjshdlkjfhlksdjfhljdsklfhlkdsfhlkdsjflsd",
+            "labeler_name": "",
+            "brand_name": "",
+            "expiry_date": "",
+            "ndc": "",
+            "description": ""
+        }
+    },
+    {
+        "cabinet_number": 2,
+        "fill_status": true,
+        "current_stored_medecine": {
+            "generic_name": "adadadadadadadadadadadada",
+            "labeler_name": "",
+            "brand_name": "",
+            "expiry_date": "",
+            "ndc": "",
+            "description": ""
+        }
+    },
+    {
+        "cabinet_number": 3,
+        "fill_status": true,
+        "current_stored_medecine": {
+            "generic_name": "fsfsfsdfsdfs",
+            "labeler_name": "",
+            "brand_name": "",
+            "expiry_date": "",
+            "ndc": "",
+            "description": ""
+        }
+    },
+    {
+        "cabinet_number": 4,
+        "fill_status": false,
+        "current_stored_medecine": {}
+    }
+]

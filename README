@@ -9,14 +9,8 @@ Reviewed September 11, 2026.
 
 Prototype code for organizing, identifying, and granting access to medication in four compartments. The software provides loading, unloading, quantity tracking, and barcode verification prompts. 
 
-The lock firmware releases access. No automated pill counting or delivery is in the code.
-
 ISSUES:
 Hardware commands in the UI are stubs, the Pi API has startup and compatibility defects, and the firmware has unsafe command handling. Inventory records can diverge from physical contents. Resolve these issues. See below.
-
-TO DO:
-Wiring, lock polarity, mechanical behavior, the actual flashed firmware, scanner model, and the installed Pi service remain unverified. 
-
 
 ## 2. Current architecture
 
@@ -38,8 +32,6 @@ flowchart TD
     MCU --> Locks[Main drawer and four compartment outputs]
     MCU --> LEDs[91 NeoPixel LEDs]
 ```
-
-The dashed connection is not implemented in the running UI code. 
 
 ### Source map
 
@@ -199,7 +191,7 @@ Do not use the old `/open_drawer` endpoint as a connectivity test: its command s
 
 ## 4. Prioritized findings
 
-Severity reflects impact on this drawer, not a claim of a deployed incident. Line references identify the inspected snapshot.
+Severity reflects impact on this drawer, not a claim of a deployed incident. 
 
 | Priority | Evidence | Finding and required change |
 | --- | --- | --- |

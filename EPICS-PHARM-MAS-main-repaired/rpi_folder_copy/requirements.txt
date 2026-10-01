@@ -1,3 +1,0 @@
-Flask==3.1.2
-pyserial==3.5
-waitress==3.0.2

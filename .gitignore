@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.py[cod]
+.env
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.log
+demo-ui/
+.test-output/
+UI/db.json
+rpi_folder_copy/secure/*.env
+.merge-backup/
+
+/EPICS-PHARM-MAS-main-SQL.zip

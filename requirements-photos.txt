@@ -1,0 +1,2 @@
+# Optional JPEG rendering in Tkinter. Browser photos need no imaging library.
+Pillow>=10.4,<13

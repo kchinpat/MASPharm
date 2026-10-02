@@ -1,0 +1,42 @@
+{
+  "source_name": "FDA National Drug Code Directory via openFDA",
+  "source_website": "https://www.fda.gov/drugs/drug-approvals-and-databases/national-drug-code-directory",
+  "openfda_overview": "https://open.fda.gov/apis/drug/ndc/",
+  "manifest_url": "https://api.fda.gov/download.json",
+  "export_date": "2026-09-26",
+  "last_updated": "2026-09-26",
+  "downloaded_at": "2026-09-26T20:02:53.954310+00:00",
+  "installed_at": "2026-09-26T20:03:12.724186+00:00",
+  "download_url": "https://download.open.fda.gov/drug/ndc/drug-ndc-0001-of-0001.json.zip",
+  "source_zip_sha256": "80cba728165d4533a8ae9590b68f70d5353d5c49b874fc29a23f7317c8cad67e",
+  "installed_json_sha256": "423d8c66a8f26d0d064a8d7f5020c808e9563f7c251161b8797eb79954ece656",
+  "installed_json_bytes": 246383593,
+  "transformation": "None. Exact uncompressed official JSON export.",
+  "validation": {
+    "product_records": 138259,
+    "package_records": 256495,
+    "indexed_identifiers": 294037,
+    "unambiguous_package_identifiers": 256490,
+    "ambiguous_identifiers": 24277,
+    "sampled_exact_lookups_passed": 101,
+    "catalog_load_and_validation_seconds": 6.53,
+    "examples": [
+      {
+        "generic_name": "tirzepatide",
+        "brand_name": "Zepbound",
+        "labeler_name": "Eli Lilly and Company",
+        "ndc": "0002-0152-01",
+        "description": "1 VIAL, SINGLE-DOSE in 1 CARTON (0002-0152-01)  / .5 mL in 1 VIAL, SINGLE-DOSE"
+      },
+      {
+        "generic_name": "doxepin",
+        "brand_name": "doxepin",
+        "labeler_name": "Zydus Lifesciences Limited",
+        "ndc": "70771-1528-3",
+        "description": "30 TABLET in 1 BOTTLE (70771-1528-3)"
+      }
+    ]
+  },
+  "terms": "https://open.fda.gov/terms/",
+  "license": "https://open.fda.gov/license/"
+}

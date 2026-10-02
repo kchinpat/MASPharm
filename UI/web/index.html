@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Medication Cabinet</title>
+<link rel="stylesheet" href="/cabinet.css">
+<style>
+  .toolbar { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:20px; }
+  .toolbar a { padding:12px; color:var(--accent); }
+  .drawer .actions { display:flex; flex-wrap:wrap; }
+  .drawer .actions button { flex:1; }
+  .details label { font-size:14px; color:var(--muted); }
+  .details input { font-size:16px; margin-top:6px; }
+  select { font:inherit; padding:12px; border:1px solid var(--border); border-radius:10px; }
+  dialog { border:0; border-radius:16px; width:min(620px,94vw); padding:28px; }
+  dialog::backdrop { background:rgba(17,24,39,.5); }
+  dialog h2 { margin-top:0; } dialog p { white-space:pre-line; line-height:1.5; }
+  dialog .buttons { display:flex; justify-content:flex-end; gap:10px; margin-top:20px; }
+  .box-list { max-height:260px; overflow:auto; font-size:14px; }
+  .box-list label { display:block; padding:8px 0; } .box-list input { width:auto; }
+  .notice { white-space:pre-line; margin:12px 0; color:var(--muted); }
+  @media(max-width:1000px) { .drawers{grid-template-columns:repeat(2,1fr)} .add-layout{grid-template-columns:1fr} }
+  @media(max-width:600px) { .page{padding:20px} header{flex-wrap:wrap} .drawers,.details{grid-template-columns:1fr} .scan-card{flex-direction:column;align-items:stretch} .scan-row input{min-width:0} }
+</style>
+</head>
+<body>
+<main class="page">
+  <header><h1>Medication Cabinet</h1><span class="pill off" id="mode">Loading</span></header>
+  <div class="toolbar">
+    <button id="add-button">Add medication</button>
+    <button id="manual-button">Unlock a drawer</button>
+    <button id="status-button">Device status</button>
+    <button id="catalog-button">Choose catalog</button>
+    <a href="/api/audit" download>Export audit</a>
+    <a href="/api/backup" download>Backup</a>
+    <input type="file" id="catalog-file" accept=".json,application/json" hidden>
+  </div>
+  <div class="card scan-card">
+    <div class="scan-side"><label class="scan-label" for="rx">Scan a prescription or package to find its drawer</label><input id="rx" autocomplete="off" placeholder="Waiting for scan"></div>
+    <div class="cabinet-box"><div class="cabinet" id="cabinet"></div><div class="hint">Green shows reported open mode. Confirm closure manually.</div></div>
+  </div>
+  <p class="notice" id="catalog-notice"></p>
+  <div class="banner hidden" id="expiry">Some packages expire within 31 days or have already expired. Expired boxes cannot be dispensed.</div>
+  <section class="banner hidden" id="recovery"><span id="recovery-text"></span><p><button id="reconcile-button">Reconcile physical contents</button></p></section>
+  <section class="drawers" id="drawers"></section>
+  <section class="card hidden" id="load-view" style="margin-top:24px">
+    <h2>Add medication</h2>
+    <label for="drawer-picker">Choose a drawer</label> <select id="drawer-picker"></select>
+    <p class="scan-label" style="margin-top:20px">Scan a box or enter its package identifier</p>
+    <div class="scan-row"><input id="load-scan" autocomplete="off"><button id="lookup-button">Look up</button></div>
+    <p class="notice" id="lookup-notice">Review package details before requesting drawer access.</p>
+    <div class="details" id="fields"></div>
+    <p class="notice" id="serial"></p>
+    <div class="toolbar" style="margin-top:20px"><button class="primary" id="load-box">Confirm details and load box</button><button id="load-done" hidden>Finish loading</button><button id="load-cancel">Back / cancel</button></div>
+  </section>
+  <p class="notice" id="message" role="status" aria-live="polite"></p>
+</main>
+<dialog id="dialog"><h2 id="dialog-title"></h2><p id="dialog-text"></p><div id="dialog-extra"></div><input id="dialog-input" autocomplete="off" hidden><div class="buttons"><button id="dialog-cancel">Cancel</button><button class="primary" id="dialog-ok">Continue</button></div></dialog>
+<script>
+"use strict";
+const token = "__PHARM_TOKEN__";
+const $ = id => document.getElementById(id);
+const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const labels = {generic_name:"Medication / strength / form",ndc:"Package identifier",lot:"Lot",expiry_date:"Actual expiration",unit:"Counted unit",description:"Package description",brand_name:"Brand",labeler_name:"Manufacturer"};
+let state = null, operation = null, prepared = null, working = false;
+for (const [key,label] of Object.entries(labels)) {
+  const field = document.createElement("label");
+  field.textContent = label;
+  const input = document.createElement("input"); input.id = "field-" + key;
+  if (key === "expiry_date") input.type = "date";
+  field.append(input); $("fields").append(field);
+}
+async function api(path, data) {
+  const response = await fetch(path, data === undefined ? {} : {method:"POST",headers:{"Content-Type":"application/json","X-Pharm-Token":token},body:JSON.stringify(data)});
+  const result = await response.json();
+  if (!response.ok || result.ok === false) throw new Error(result.message || "The request failed.");
+  return result;
+}
+async function run(action) {
+  if (working) return;
+  working = true; paintBusy();
+  try { await action(); }
+  catch (error) { $("message").textContent = error.message; }
+  finally { try { await refresh(); } catch(error) { $("message").textContent=error.message; } finally { working=false; paintBusy(); } }
+}
+function ask(title, text, type=null, initial="", extra="") {
+  return new Promise(resolve => {
+    $("dialog-title").textContent = title; $("dialog-text").textContent = text;
+    $("dialog-extra").innerHTML = extra;
+    const input = $("dialog-input"); input.hidden = !type; input.type = type || "text"; input.value = initial;
+    const finish = okay => { $("dialog").close(); resolve(okay ? (type ? input.value : true) : null); };
+    $("dialog-ok").onclick = () => finish(true); $("dialog-cancel").onclick = () => finish(false);
+    $("dialog").oncancel = event => {event.preventDefault();finish(false);};
+    input.onkeydown = event => {if(event.key === "Enter") {event.preventDefault();finish(true);}};
+    $("dialog").showModal(); if(type) input.focus(); else $("dialog-ok").focus();
+  });
+}
+function paintBusy() {
+  const active = !!state?.active;
+  for(const id of ["add-button","manual-button","catalog-button"]) $(id).disabled = working || active;
+  for(const id of ["status-button","lookup-button","load-box","load-done","load-cancel","reconcile-button"]) $(id).disabled = working;
+  $("rx").disabled = working || active;
+  for(const button of $("drawers").querySelectorAll("button[data-action]")) button.disabled = working || active;
+}
+async function refresh() {
+  state = await api("/api/state");
+  $("mode").textContent = state.mode;
+  $("catalog-notice").textContent = state.catalog || "Catalog loaded. Scans must match an exact package.";
+  $("expiry").classList.toggle("hidden", !state.drawers.some(d=>d.expiring));
+  const active = state.active;
+  const ownLoad = active && operation?.id === active.id && active.kind === "load" && active.state === "access";
+  $("recovery").classList.toggle("hidden", !active || ownLoad);
+  $("recovery-text").textContent = active ? `Drawer ${active.compartment} has an unfinished ${active.kind} operation. ${active.verified} scans verified. Inspect its contents before continuing.` : "";
+  $("drawer-picker").disabled = !!active;
+  $("load-done").hidden = !ownLoad;
+  if(ownLoad) { operation=active; $("load-box").textContent="Add this scanned box"; $("lookup-notice").textContent=`${active.requested} boxes staged. Inventory will be saved after placement and closure confirmations.`; }
+  $("drawers").innerHTML = state.drawers.map(d=>{
+    const p=d.product, filled=d.quantity>0, lots=[...new Set(d.items.map(i=>i.product.lot))];
+    return `<article class="card drawer"><h2>Drawer ${d.id}</h2><div class="photo">${d.photo?`<img src="${esc(d.photo)}" alt="Reference package photo">`:filled?"No photo":"Empty"}</div><div class="name">${esc(p.generic_name||"Nothing stored")}</div><div class="generic">${esc(p.brand_name||"")}</div><div class="stock">In stock: <b>${d.quantity} ${esc(p.unit||"")}</b></div>${filled?`<p class="exp ${d.expiring?"soon":""}">Earliest expiration: ${esc(p.expiry_date)}<br>Lot: ${esc(lots.join(", "))}</p><details><summary>Box records</summary><div class="box-list">${d.items.map(i=>`<div>Lot ${esc(i.product.lot)} | ${esc(i.product.expiry_date)} | Serial ${esc(i.serial||"not recorded")}</div>`).join("")}</div></details>`:""}<div class="actions"><button data-action="load" data-drawer="${d.id}">Add</button>${filled?`<button class="primary" data-action="dispense" data-drawer="${d.id}">Dispense</button><button class="danger" data-action="unload" data-drawer="${d.id}">Empty drawer</button><button data-action="photo" data-drawer="${d.id}">Fetch photo</button>`:""}</div></article>`;
+  }).join("");
+  $("cabinet").innerHTML = state.drawers.map(d=>`<div class="cab-slot ${state.open_mode.includes(d.id)?"open":d.quantity?"filled":"empty"}" data-status-drawer="${d.id}">${d.id}</div>`).join("");
+  paintBusy();
+}
+function showLoad(number=1) {
+  prepared=null; operation=null;
+  $("load-view").classList.remove("hidden"); $("drawer-picker").innerHTML=state.drawers.map(d=>`<option value="${d.id}">Drawer ${d.id}: ${d.quantity} units</option>`).join("");
+  $("drawer-picker").value=number; $("load-scan").value="";
+  $("load-box").textContent="Confirm details and load box";
+  const product=state.drawers[number-1].product;
+  for(const key of Object.keys(labels)) $("field-"+key).value=product[key]||(key==="unit"?"box":"");
+  $("serial").textContent=""; $("load-scan").focus();
+}
+async function lookup() {
+  const scan=$("load-scan").value.trim(); prepared=await api("/api/preview",{scan});
+  const existing=state.drawers[Number($("drawer-picker").value)-1].product;
+  if(existing.ndc && existing.ndc.replaceAll("-","")===prepared.product.ndc?.replaceAll("-","")) {
+    prepared.product={...existing,...prepared.product};
+    if(!prepared.scan.lot) prepared.product.lot=existing.lot;
+    if(!prepared.scan.expiry_date) prepared.product.expiry_date=existing.expiry_date;
+    prepared.product.unit=existing.unit;
+  }
+  for(const key of Object.keys(labels)) $("field-"+key).value=prepared.product[key]||"";
+  $("lookup-notice").textContent=prepared.notice;
+  $("serial").textContent=prepared.scan.serial?`Serial: ${prepared.scan.serial}`:"Serial number not encoded in this scan.";
+}
+async function loadBox() {
+  const scan=$("load-scan").value.trim();
+  if(scan && (!prepared || prepared.scan.original_scan!==scan)) await lookup();
+  const product=Object.fromEntries(Object.keys(labels).map(key=>[key,$("field-"+key).value]));
+  if(operation) {
+    operation=(await api("/api/add",{operation:operation.id,product,scan})).operation;
+  } else {
+    operation=(await api("/api/start",{kind:"load",drawer:Number($("drawer-picker").value),count:1,product,scan})).operation;
+  }
+  $("message").textContent="Place this verified box in the selected drawer. Its stock record is staged until you finish loading.";
+  $("load-scan").value=""; prepared=null; $("load-scan").focus();
+}
+async function cancelOperation(id, reason) {
+  await api("/api/cancel",{operation:id,reason}); operation=null;
+  $("message").textContent="Inventory is not finalized. Reconcile the physical remaining contents before continuing.";
+}
+async function complete(op) {
+  if(!await ask("Confirm physical contents",op.kind==="load"?`Have all ${op.requested} staged boxes been placed in drawer ${op.compartment}?`:op.kind==="unload"?"Have all contents been removed and the drawer checked empty?":`Have exactly ${op.requested} verified boxes been removed?`)) return cancelOperation(op.id,"Physical count not confirmed");
+  if(!await ask("Confirm closure","Close the selected drawer. Have you confirmed it is closed?")) return cancelOperation(op.id,"Closure not confirmed");
+  const result=await api("/api/finish",{operation:op.id,placed:true,closed:true});
+  operation=null; $("load-view").classList.add("hidden"); $("message").textContent="Operation complete. Inventory saved."+(result.lock_ok?"":" Lock request failed: "+result.lock_message);
+}
+async function dispense(number) {
+  const drawer=state.drawers[number-1];
+  const text=await ask("Dispense",`How many ${drawer.product.unit} of ${drawer.product.generic_name}? In stock: ${drawer.quantity}.`,"number","1");
+  if(text===null) return;
+  const count=Number(text); if(!Number.isInteger(count)||count<1) throw new Error("Enter a positive whole number.");
+  let op=(await api("/api/start",{kind:"dispense",drawer:number,count})).operation;
+  for(let index=0;index<count;index++) {
+    const scan=await ask("Verify each box",`Scan box ${index+1} of ${count} as you remove it from drawer ${number}. If access has timed out, submit an empty scan to request reopening.`,"text");
+    if(scan===null) return cancelOperation(op.id,"Cancelled after drawer access");
+    if(scan.trim()==="") { if(await ask("Request drawer access again","Request one new access command for the same drawer?")) await api("/api/reopen",{operation:op.id}); index--; continue; }
+    op=(await api("/api/verify",{operation:op.id,scan})).operation;
+  }
+  await complete(op);
+}
+async function unload(number) {
+  if(!await ask("Empty drawer",`Remove all stock from drawer ${number}?`)) return;
+  const op=(await api("/api/start",{kind:"unload",drawer:number})).operation;
+  await complete(op);
+}
+async function manual() {
+  const text=await ask("Manual access","Which drawer do you need? (1 through 4)","number","1"); if(text===null) return;
+  const reason=await ask("Reason for access","Describe why you need manual drawer access.","text"); if(reason===null) return;
+  const op=(await api("/api/start",{kind:"manual",drawer:Number(text),reason})).operation;
+  await ask("Manual inspection",`Drawer ${op.compartment} access was acknowledged. Finish the inspection, then reconcile its remaining contents.`);
+  await cancelOperation(op.id,"Manual inspection requires a physical count");
+}
+async function reconcile() {
+  const op=state.active;
+  const records=state.choices;
+  const tracked=records.some(i=>i.serial)||new Set(records.map(i=>JSON.stringify(i.product))).size>1;
+  let count, ids;
+  if(tracked) {
+    const list=`<div class="box-list">${records.map(i=>`<label><input type="checkbox" class="remaining-box" value="${esc(i.id)}"> Lot ${esc(i.product.lot)} | ${esc(i.product.expiry_date)} | Serial ${esc(i.serial||"not recorded")}</label>`).join("")}</div>`;
+    const okay=await ask("Reconcile box records","Inspect the drawer. Select only recorded boxes physically present. Remove any unidentified stock.",null,"",list);
+    if(!okay) return;
+    ids=Array.from(document.querySelectorAll(".remaining-box:checked"),e=>e.value); count=ids.length;
+  } else {
+    const text=await ask("Reconcile remaining stock","Inspect the drawer and enter the actual remaining count of the recorded product and lot. Remove unidentified stock.","number","0"); if(text===null) return;
+    count=Number(text); if(!Number.isInteger(count)||count<0) throw new Error("Enter a nonnegative whole number.");
+  }
+  const reason=await ask("Reconciliation reason","Explain the interrupted operation or discrepancy.","text"); if(reason===null) return;
+  if(!await ask("Confirm closure","Have you verified the contents and closed all four drawers?")) return;
+  const data={operation:op.id,count,reason,closed:true}; if(ids) data.remaining_ids=ids;
+  const result=await api("/api/reconcile",data); operation=null; $("load-view").classList.add("hidden"); $("message").textContent="Reconciled contents saved."+(result.lock_ok?"":" Lock request failed: "+result.lock_message);
+}
+$("drawers").onclick=event=>{
+  const button=event.target.closest("button[data-action]"); if(!button) return;
+  const number=Number(button.dataset.drawer), action=button.dataset.action;
+  if(action==="load") return showLoad(number);
+  run(()=>action==="dispense"?dispense(number):action==="unload"?unload(number):api(`/api/photo/${number}`,{}).then(r=>$("message").textContent=r.message));
+};
+$("add-button").onclick=()=>showLoad();
+$("manual-button").onclick=()=>run(manual);
+$("lookup-button").onclick=()=>run(lookup);
+$("load-scan").onkeydown=event=>{if(event.key==="Enter") {event.preventDefault();run(lookup);}};
+$("load-box").onclick=()=>run(loadBox);
+$("load-done").onclick=()=>run(()=>complete(operation));
+$("load-cancel").onclick=()=>run(async()=>{if(operation) await cancelOperation(operation.id,"Loading cancelled after access"); $("load-view").classList.add("hidden");});
+$("reconcile-button").onclick=()=>run(reconcile);
+$("drawer-picker").onchange=()=>showLoad(Number($("drawer-picker").value));
+$("rx").onkeydown=event=>{if(event.key==="Enter") {event.preventDefault();run(async()=>{const match=await api("/api/find",{scan:$("rx").value});$("rx").value="";let number=match.drawers[0];if(match.drawers.length>1){const text=await ask("Choose a drawer",`Matching drawers: ${match.drawers.join(", ")}`,"number",String(number));if(text===null)return;number=Number(text);if(!match.drawers.includes(number))throw new Error("Choose a matching drawer.");}await dispense(number);});}};
+$("status-button").onclick=()=>run(async()=>{
+  const status=await api("/api/status"); $("message").textContent=status.message;
+  for(const slot of document.querySelectorAll("[data-status-drawer]")) slot.classList.toggle("open",status.open_mode.includes(Number(slot.dataset.statusDrawer)));
+});
+$("catalog-button").onclick=()=>$("catalog-file").click();
+$("catalog-file").onchange=()=>run(async()=>{
+  if(!$("catalog-file").files[0]) return;
+  const form=new FormData(); form.append("catalog",$("catalog-file").files[0]);
+  const response=await fetch("/api/catalog",{method:"POST",headers:{"X-Pharm-Token":token},body:form});const result=await response.json();
+  if(!response.ok) throw new Error(result.message); $("message").textContent="Catalog selected and remembered.";$("catalog-file").value="";
+});
+refresh().then(()=>$("rx").focus()).catch(error=>$("message").textContent=error.message);
+setInterval(()=>{if(!working&&!$("dialog").open)refresh().catch(()=>{});},4000);
+window.addEventListener("beforeunload",event=>{if(operation){event.preventDefault();event.returnValue="";}});
+</script>
+</body>
+</html>

@@ -1,0 +1,2 @@
+# Optional local browser UI, using the existing repaired environment's Flask version.
+Flask==3.1.2

@@ -1,0 +1,14 @@
+[Unit]
+Description=Combined Pharmacy Cabinet Desktop (Simulation)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=exec
+ExecStart=%h/Desktop/EPICS-PHARM-MAS-main-repaired/.venv/bin/python -m pharm.app
+Restart=always
+RestartSec=5
+WorkingDirectory=%h/Desktop/EPICS-PHARM-MAS-main-repaired
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,0 +1,2 @@
+# Desktop simulation uses only Python 3.10+ standard library, including Tcl/Tk.
+# Raspberry Pi API dependencies are pinned in rpi_folder_copy/requirements.txt.

@@ -37,7 +37,18 @@ class PackagePhotos(HTMLParser):
 def cached(directory, code):
     directory = Path(directory)
     key = identifier(code)
-    return next((directory / f"{key}{ext}" for ext in (".jpg", ".png", ".gif") if (directory / f"{key}{ext}").is_file()), None)
+    found = next((directory / f"{key}{ext}" for ext in (".jpg", ".png", ".gif") if (directory / f"{key}{ext}").is_file()), None)
+    if found or not directory.is_dir():
+        return found
+    # The bundled reference photos keep the label's hyphenated NDC as their file name.
+    for path in sorted(directory.iterdir()):
+        if path.suffix in (".jpg", ".png", ".gif") and "-" in path.stem and path.is_file():
+            try:
+                if identifier(path.stem) == key:
+                    return path
+            except ValueError:
+                pass
+    return None
 
 
 def fetch_photo(directory, code, product_code=None):

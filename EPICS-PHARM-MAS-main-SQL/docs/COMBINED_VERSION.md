@@ -4,7 +4,8 @@ The repaired directory is the maintained combined application. It includes the t
 
 ## Start the interfaces
 
-- **Launch Pharmacy Drawer.cmd** opens the desktop in simulation.
+- **Launch Simulation.cmd** opens the desktop in simulation without leaving a console window open.
+- **Launch Pharmacy Drawer.cmd** opens the desktop in simulation and keeps its console for diagnostics.
 - **Launch Browser Cabinet.cmd** starts the local browser server and opens `http://127.0.0.1:8000`. Keep its console open; closing the server stops the browser interface.
 - **Launch USB Bench.cmd** selects a port for repaired MAS/1 firmware.
 - **Launch Team USB Bench.cmd** selects a port for the team's pressure-sensor/byte-echo firmware.
@@ -40,7 +41,7 @@ GTIN-14 with `00` padding can map to its explicit UPC-A catalog alias. The catal
 
 Review medication identity, lot, actual expiration and counted unit. GS1 stock details come from the scanned package, rather than catalog listing dates. Each scanned serial can be recorded only once in current stock or the active loading session. Scanned boxes expiring within 31 days are not added. Manual entry still validates actual expiration and requires stock details.
 
-In the browser, the first **Confirm details and load box** requests access and stages its record. Scan and add further boxes of the same package and counted unit, then **Finish loading**. Different lots and expiration dates stay attached to their individual boxes. The desktop supports the same box records by scanning the requested units before placement. Manual quantities without box scans retain the repaired single-lot top-up validation.
+In the browser, the first **Confirm and load box** requests access and stages its record. Scan and add further boxes of the same package and counted unit, then **Finish loading**. Different lots and expiration dates stay attached to their individual boxes. The desktop supports the same box records by scanning the requested units before placement. Manual quantities without box scans retain the repaired single-lot top-up validation.
 
 Inventory changes after placement/removal and closure confirmation. A lock command is then requested, but its acknowledgement is not required to save inventory. No physical security confirmation is requested. A failed lock request is displayed without undoing the saved count.
 
@@ -50,7 +51,7 @@ Scan a prescription/package to find its drawer or use its **Dispense** button. S
 
 Cancelled, interrupted, or failed access remains visible for reconciliation after restarting either interface. Inspect the actual contents. For mixed lots or serial-numbered stock, select the recorded boxes physically present; a count alone cannot identify them. Remove unidentified stock. Record the reason, confirm closure and security, then save. Anonymous single-lot stock can still be reconciled by its observed count. Existing aggregate SQLite stock is expanded into anonymous unit records on first use, with quantities and product metadata retained. Example JSON stock is not imported.
 
-Both interfaces provide audit export, database backup, manual access with a reason, box-record details and earliest-expiration display. Expiration alerts appear within 31 days. **Fetch photo** performs an optional bounded DailyMed lookup and caches a reference image outside the inventory transaction. Failure to fetch a photo does not change stock or block other operations.
+Both interfaces provide audit export, database backup, manual access with a reason, box-record details and earliest-expiration display. Expiration alerts appear within 31 days. The selected drawer shows its cached or bundled package label photo (click to enlarge). When none is saved, **Download photo** offers an optional bounded DailyMed lookup, which caches the image outside the inventory transaction. Failure to fetch a photo does not change stock or block other operations.
 
 ## Firmware and preserved team assets
 

@@ -380,6 +380,16 @@ class PhotoTests(unittest.TestCase):
             self.assertEqual(path, cached(directory, "00123"))
             self.assertEqual(5, opener.open.call_args.kwargs["timeout"])
 
+    def test_bundled_photos_keep_hyphenated_names_and_match_exactly(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "0406-0512-01.jpg").write_bytes(b"\xff\xd8\xffSYNTHETIC")
+            Path(directory, "0406-0512-1.jpg").write_bytes(b"\xff\xd8\xffSYNTHETIC")
+            self.assertEqual("0406-0512-01.jpg", cached(directory, "0406-0512-01").name)
+            self.assertEqual("0406-0512-01.jpg", cached(directory, "0406051201").name)
+            self.assertEqual("0406-0512-1.jpg", cached(directory, "040605121").name)
+            self.assertIsNone(cached(directory, "04060512"))
+            self.assertIsNone(cached(Path(directory) / "absent", "0406051201"))
+
     def test_photo_cache_rejects_path_traversal(self):
         with self.assertRaises(ValueError):
             cached(".", "../private")

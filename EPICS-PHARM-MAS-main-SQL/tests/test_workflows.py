@@ -24,7 +24,7 @@ class WorkflowTests(unittest.TestCase):
         self.app.status_text = type("Status", (), {"set": lambda self, text: None})()
         self.app.home = lambda: None
         self.app.device = lambda action, done: done(action())
-        self.dialogs = patch("pharm.app.messagebox")
+        self.dialogs = patch("pharm.app.dialogs")
         self.messages = self.dialogs.start()
         self.messages.askyesno.return_value = True
         op = self.app.store.begin("load", 1, 3, PRODUCT, "admin")
@@ -36,30 +36,30 @@ class WorkflowTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_successful_dispense_through_ui(self):
-        with patch("pharm.app.simpledialog.askinteger", return_value=2), \
-             patch("pharm.app.simpledialog.askstring", return_value="0123456789"):
+        with patch("pharm.app.dialogs.askinteger", return_value=2), \
+             patch("pharm.app.dialogs.askstring", return_value="0123456789"):
             self.app.dispense(1)
         self.assertEqual(1, self.app.store.compartments()[0]["quantity"])
         self.assertIsNone(self.app.store.active())
         self.assertIsNone(self.app.hardware.selected)
 
     def test_partial_scan_failure_stays_pending(self):
-        with patch("pharm.app.simpledialog.askinteger", return_value=2), \
-             patch("pharm.app.simpledialog.askstring", side_effect=["0123456789", "wrong"]):
+        with patch("pharm.app.dialogs.askinteger", return_value=2), \
+             patch("pharm.app.dialogs.askstring", side_effect=["0123456789", "wrong"]):
             self.app.dispense(1)
         self.assertEqual("reconciliation", self.app.store.active()["state"])
         self.assertEqual(1, self.app.store.active()["verified"])
         self.assertEqual(3, self.app.store.compartments()[0]["quantity"])
 
     def test_cancelled_quantity_never_requests_hardware(self):
-        with patch("pharm.app.simpledialog.askinteger", return_value=None):
+        with patch("pharm.app.dialogs.askinteger", return_value=None):
             self.app.dispense(1)
         self.assertIsNone(self.app.store.active())
         self.assertIsNone(self.app.hardware.selected)
 
     def test_open_failure_is_durably_reconcilable(self):
         self.app.hardware.open = lambda number: Result(False, "No acknowledgement")
-        with patch("pharm.app.simpledialog.askinteger", return_value=1):
+        with patch("pharm.app.dialogs.askinteger", return_value=1):
             self.app.dispense(1)
         self.assertEqual("reconciliation", self.app.store.active()["state"])
         self.assertEqual(3, self.app.store.compartments()[0]["quantity"])
@@ -103,8 +103,8 @@ class WorkflowTests(unittest.TestCase):
 
     def test_lock_failure_does_not_prevent_commit(self):
         self.app.hardware.lock = lambda: Result(False, "Lock failed")
-        with patch("pharm.app.simpledialog.askinteger", return_value=1), \
-             patch("pharm.app.simpledialog.askstring", return_value="0123456789"):
+        with patch("pharm.app.dialogs.askinteger", return_value=1), \
+             patch("pharm.app.dialogs.askstring", return_value="0123456789"):
             self.app.dispense(1)
         self.assertIsNone(self.app.store.active())
         self.assertEqual(2, self.app.store.compartments()[0]["quantity"])
@@ -116,8 +116,8 @@ class WorkflowTests(unittest.TestCase):
         self.app.store.access(op, "admin")
         self.app.store.cancel(op, "admin", "Power loss")
         self.app.hardware.lock = lambda: Result(False, "Disconnected")
-        with patch("pharm.app.simpledialog.askinteger", return_value=2), \
-             patch("pharm.app.simpledialog.askstring", return_value="Counted remaining bottles"):
+        with patch("pharm.app.dialogs.askinteger", return_value=2), \
+             patch("pharm.app.dialogs.askstring", return_value="Counted remaining bottles"):
             self.app.reconcile()
         self.assertEqual(2, self.app.store.compartments()[0]["quantity"])
         self.assertIsNone(self.app.store.active())
@@ -131,8 +131,8 @@ class WorkflowTests(unittest.TestCase):
         op = self.app.store.begin("dispense", 1, 1, {}, "admin")
         self.app.store.access(op, "admin")
         self.app.store.cancel(op, "admin", "Power loss")
-        with patch("pharm.app.simpledialog.askinteger", return_value=2), \
-             patch("pharm.app.simpledialog.askstring", return_value="Counted remaining bottles"):
+        with patch("pharm.app.dialogs.askinteger", return_value=2), \
+             patch("pharm.app.dialogs.askstring", return_value="Counted remaining bottles"):
             self.app.reconcile()
         self.assertEqual(2, self.app.store.compartments()[0]["quantity"])
         self.assertIsNone(self.app.store.active())

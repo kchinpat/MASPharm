@@ -1,4 +1,4 @@
-param([switch]$SmokeTest, [string]$DataDir, [switch]$Usb, [switch]$TeamUsb, [switch]$Web)
+param([switch]$SmokeTest, [string]$DataDir, [switch]$Usb, [switch]$TeamUsb, [switch]$Web, [switch]$Detached)
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 $taskCandidates = @()
@@ -32,5 +32,14 @@ if ($SmokeTest) { $taskArgs += '--smoke-test' }
 if ($Usb) { $taskArgs += '--usb' }
 if ($TeamUsb) { $taskArgs += '--team-usb' }
 if ($DataDir) { $taskArgs += @('--data-dir', $DataDir) }
+if ($Detached -and -not $Web -and -not $SmokeTest) {
+    # Start the windowless interpreter beside the selected one so no console stays open.
+    $taskWindowless = Join-Path (Split-Path -Parent $taskPython) $(if ((Split-Path -Leaf $taskPython) -ieq 'py.exe') { 'pyw.exe' } else { 'pythonw.exe' })
+    if (Test-Path -LiteralPath $taskWindowless) {
+        $taskQuoted = $taskArgs | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }
+        Start-Process -FilePath $taskWindowless -ArgumentList $taskQuoted -WorkingDirectory $PSScriptRoot
+        exit 0
+    }
+}
 & $taskPython @taskArgs
 exit $LASTEXITCODE

@@ -51,9 +51,17 @@ def cached(directory, code):
     return None
 
 
+def searchable(code):
+    # DailyMed indexes NDCs, not GTINs: a drug GTIN-14 is indicator + "03" + 10-digit NDC + check digit.
+    key = identifier(code)
+    if len(key) == 14 and key[1:3] == "03":
+        return key[3:13]
+    return code
+
+
 def fetch_photo(directory, code, product_code=None):
     key = identifier(code)
-    search = "https://" + HOST + "/dailymed/search.cfm?" + urlencode({"labeltype": "all", "query": product_code or code})
+    search = "https://" + HOST + "/dailymed/search.cfm?" + urlencode({"labeltype": "all", "query": product_code or searchable(code)})
     opener = build_opener(OfficialRedirects())
     headers = {"User-Agent": "EPICS-Pharm/combined (package photo lookup)"}
     with opener.open(Request(search, headers=headers), timeout=5) as response:

@@ -8,14 +8,14 @@ import unittest
 from unittest.mock import Mock, patch
 from datetime import date, timedelta
 
-from pharm.barcodes import read_scan, expiry_date
+from pharm.barcodes import read_scan, expiry_date, drug_ndc
 from pharm.catalog import Catalog
 from pharm.hardware import Simulator, Result
 from pharm.store import Store
 from pharm.team_hardware import TeamSerialHardware
 from pharm.web import create_app
 from pharm.workflows import WorkflowService
-from pharm.photos import fetch_photo, cached, OfficialRedirects
+from pharm.photos import fetch_photo, cached, searchable, OfficialRedirects
 from test_inventory import PRODUCT
 
 GTIN = "00001234567895"
@@ -58,6 +58,14 @@ class BarcodeTests(unittest.TestCase):
     def test_numeric_identifiers_keep_leading_zeros(self):
         self.assertEqual("001234", read_scan("00-1234")["code"])
 
+    def test_drug_ndc_needs_the_drug_range_indicator_0_and_a_valid_check_digit(self):
+        for code in ("359651029886", "0359651029886", "00359651029886"):
+            with self.subTest(code=code):
+                self.assertEqual("5965102988", drug_ndc(code))
+        for code in ("359651029887", "10359651029883", GTIN, "3596510298", "3359651029886"):
+            with self.subTest(code=code):
+                self.assertEqual("", drug_ndc(code))
+
 
 class CombinedFixture(unittest.TestCase):
     def setUp(self):
@@ -95,6 +103,18 @@ class CombinedTests(CombinedFixture):
         self.assertEqual("DEMO-LOT", preview["product"]["lot"])
         self.assertEqual("2099-12-31", preview["product"]["expiry_date"])
         self.assertEqual("BOX1", preview["scan"]["serial"])
+
+    def test_drug_barcode_preview_fills_medication_and_unit_then_loads(self):
+        path = self.directory / "described.json"
+        path.write_text(json.dumps([{"generic_name": PRODUCT["generic_name"],
+                                     "packaging": [{"package_ndc": PRODUCT["ndc"], "description": "1 TUBE in 1 CARTON (01234-5678-9)"}]}]))
+        self.service.catalog = Catalog(path)
+        scan = "(01)00301234567896(21)RX1(17)991231(10)RX-LOT"
+        product = self.service.preview(scan)["product"]
+        self.assertEqual((PRODUCT["generic_name"], "carton", PRODUCT["ndc"]), (product["generic_name"], product["unit"], product["ndc"]))
+        self.complete(self.service.start("load", 1, 1, product, scan))
+        drawer = self.store.compartments()[0]
+        self.assertEqual((1, "carton", "RX1"), (drawer["quantity"], drawer["product"]["unit"], drawer["items"][0]["serial"]))
 
     def test_mixed_lots_stay_pending_until_confirmed_and_show_earliest(self):
         op = self.start_box()
@@ -389,6 +409,11 @@ class PhotoTests(unittest.TestCase):
             self.assertEqual("0406-0512-1.jpg", cached(directory, "040605121").name)
             self.assertIsNone(cached(directory, "04060512"))
             self.assertIsNone(cached(Path(directory) / "absent", "0406051201"))
+
+    def test_photo_search_uses_the_ndc_inside_a_drug_gtin(self):
+        self.assertEqual("5965102988", searchable("00359651029886"))
+        self.assertEqual("59651-029-88", searchable("59651-029-88"))
+        self.assertEqual("00012345678905", searchable("00012345678905"))
 
     def test_photo_cache_rejects_path_traversal(self):
         with self.assertRaises(ValueError):

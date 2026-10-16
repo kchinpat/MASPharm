@@ -63,7 +63,7 @@
 const token = "__PHARM_TOKEN__";
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const labels = {generic_name:"Medication",ndc:"Package ID",lot:"Lot",expiry_date:"Expiration date",unit:"Unit counted (bottle, box, tablet)",description:"Package description",brand_name:"Brand",labeler_name:"Labeler"};
+const labels = {generic_name:"Medication",ndc:"Package ID",lot:"Lot",expiry_date:"Expiration date",unit:"Unit type (bottle, box, tablet)",description:"Package description",brand_name:"Brand",labeler_name:"Labeler"};
 const optional = new Set(["description","brand_name","labeler_name"]);
 const wide = new Set(["generic_name","description"]);
 let state = null, operation = null, prepared = null, working = false;
@@ -84,7 +84,7 @@ $("fields").append(moreFields);
 function localToday() { const now = new Date(); return new Date(now - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10); }
 function plural(unit, count) {
   unit = String(unit || "").trim();
-  if (count === 1 || !/^[a-z]+$/.test(unit) || unit.endsWith("s")) return unit;
+  if (count === 1 || !/^[a-z]+( [a-z]+)*$/.test(unit) || unit.endsWith("s")) return unit;
   return unit + (/(x|ch|sh)$/.test(unit) ? "es" : "s");
 }
 function expiryNote(expiry) {
@@ -300,7 +300,7 @@ async function reconcile() {
     const text=await ask("Count drawer","How many of the recorded product and lot are physically in the drawer? Remove anything else first.","number","0"); if(text===null) return;
     count=Number(text); if(!Number.isInteger(count)||count<0) throw new Error("Enter a nonnegative whole number.");
   }
-  const reason=await ask("Count drawer","What happened? This is recorded in the audit log.","text"); if(reason===null) return;
+  const reason=await ask("Count drawer","What happened? This is recorded in the audit log. (Optional)","text"); if(reason===null) return;
   if(!await ask("Confirm closure","Have you verified the contents and closed all four drawers?",null,"","",{ok:"Yes"})) return;
   const data={operation:op.id,count,reason,closed:true}; if(ids) data.remaining_ids=ids;
   const result=await api("/api/reconcile",data); operation=null; view="drawer"; $("message").textContent="Count saved."+(result.lock_ok?"":" Lock request failed: "+result.lock_message);

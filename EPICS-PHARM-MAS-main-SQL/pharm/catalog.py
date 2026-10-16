@@ -2,7 +2,7 @@
 import json
 import re
 from pathlib import Path
-from .barcodes import read_scan, aliases
+from .barcodes import read_scan, aliases, drug_ndc
 
 
 def identifier(value):
@@ -11,9 +11,32 @@ def identifier(value):
     return value.strip().replace("-", "")
 
 
+def unit_type(description):
+    """The outer container in an FDA package description as a unit type, such as
+    "bottle" for "100 TABLET in 1 BOTTLE, PLASTIC (0406-0512-01) / ...", or ""."""
+    outer = re.split(r">| / |\*", description)[0]
+    match = re.search(r"\bin [0-9.,]+ ([a-z][a-z -]*)", outer, re.I)
+    unit = match[1].strip().lower() if match else ""
+    return "" if unit == "not applicable" else unit
+
+
+def shared(packages):
+    """Medication fields every candidate package agrees on, or {} without a common name."""
+    fields = {}
+    for key in ("generic_name", "brand_name", "labeler_name"):
+        values = {item[key] for item in packages}
+        if len(values) == 1 and "" not in values:
+            fields[key] = values.pop()
+    units = {unit_type(item["description"]) for item in packages}
+    if len(units) == 1 and "" not in units:
+        fields["unit"] = units.pop()
+    return fields if "generic_name" in fields else {}
+
+
 class Catalog:
     def __init__(self, path):
         self.index = {}
+        self.products = {}  # "labeler-product" NDC segments -> packages
         self.warning = ""
         path = Path(path)
         if not path.exists():
@@ -44,6 +67,9 @@ class Catalog:
                     item.update(ndc=package["package_ndc"], description=str(package.get("description") or ""))
                     self.index.setdefault(code, []).append(item)
                     valid.append(item)
+                    segments = item["ndc"].strip().split("-")
+                    if len(segments) == 3:
+                        self.products.setdefault("-".join(segments[:2]), []).append(item)
                 annotations = product.get("openfda") or {}
                 upcs = annotations.get("upc", []) if isinstance(annotations, dict) else []
                 if isinstance(upcs, list):
@@ -58,13 +84,29 @@ class Catalog:
             self.warning = f"Catalog unavailable: {exc}"
 
     def lookup(self, scan):
+        parsed = read_scan(scan)
+        # The NDC inside a drug barcode names one package, even where a product
+        # lists one UPC for all its packages or a relabeler repeats that UPC.
+        ndc = drug_ndc(parsed["code"])
+        for codes in ([ndc] if ndc else [], aliases(parsed)):
+            matches = [item for code in codes for item in self.index.get(code, [])]
+            unique = {json.dumps(item, sort_keys=True): item for item in matches}
+            if len(unique) == 1:
+                return dict(next(iter(unique.values())))
+        raise ValueError("No exact package match." if not unique else
+                         "Ambiguous package match. Scan the package NDC or enter verified package details.")
+
+    def similar(self, scan):
+        """Packages sharing the scanned code or, failing that, the labeler and
+        product segments of its NDC (4-4-2, 5-3-2 or 5-4-1)."""
         codes = aliases(read_scan(scan))
-        matches = [item for code in codes for item in self.index.get(code, [])]
-        unique = {json.dumps(item, sort_keys=True): item for item in matches}
-        if len(unique) != 1:
-            raise ValueError("No exact package match." if not unique else
-                             "Ambiguous package match. Scan the package NDC or enter verified package details.")
-        return dict(next(iter(unique.values())))
+        found = [item for code in codes for item in self.index.get(code, [])]
+        if not found:
+            for code in codes:
+                if len(code) == 10:
+                    for size, end in ((4, 8), (5, 8), (5, 9)):
+                        found += self.products.get(f"{code[:size]}-{code[size:end]}", [])
+        return found
 
     def matches(self, scan, expected):
         if identifier(expected) in aliases(read_scan(scan)):
@@ -75,17 +117,30 @@ class Catalog:
             return False
 
     def loading_details(self, scan):
-        """Use a valid scan for manual entry when no exact catalog match exists.
+        """Fill the loading form from a scan, including the unit type read from
+        the package description; keep the scan for manual entry otherwise.
 
         Never carry a prior package's identity, lot or expiration into a new
         selection. An ambiguous lookup falls back to the actual scanned code,
-        without choosing a catalog package on the operator's behalf.
+        without choosing a catalog package on the operator's behalf, but still
+        fills the medication and unit when every related package agrees.
         """
         parsed = read_scan(scan)
         code = parsed["code"]
         stock = {k: parsed[k] for k in ("lot", "expiry_date") if parsed[k]}
         try:
-            return {**self.lookup(scan), **stock}, "Package found. Review lot, actual expiration and unit before loading."
+            product = self.lookup(scan)
         except ValueError as exc:
+            # Best effort: fill what every related catalog package agrees on,
+            # but keep the scanned identifier rather than picking a package.
+            guess = shared(self.similar(scan))
+            if guess:
+                filled = "Medication and unit type" if "unit" in guess else "Medication"
+                return {**guess, "ndc": code, **stock}, (f"{exc} Scanned identifier retained. {filled} filled from "
+                                                       "related catalog packages; check them against the label "
+                                                       "and complete the remaining details.")
             return {"ndc": code, **stock}, (f"{exc} Scanned identifier retained. Enter the package details, "
                                   "lot, expiration and unit manually.")
+        unit = unit_type(product["description"])
+        return ({**product, **({"unit": unit} if unit else {}), **stock},
+                "Package found. Review lot, actual expiration and unit before loading.")

@@ -39,7 +39,7 @@ FIELDS = (
     ("ndc", "Package ID", 1, False),
     ("lot", "Lot", 1, False),
     ("expiry_date", "Expiration date (YYYY-MM-DD)", 1, False),
-    ("unit", "Unit counted (bottle, box, tablet)", 1, False),
+    ("unit", "Unit type (bottle, box, tablet)", 1, False),
     ("description", "Package description", 2, True),
     ("brand_name", "Brand", 1, True),
     ("labeler_name", "Labeler", 1, True),
@@ -47,9 +47,9 @@ FIELDS = (
 
 
 def plural(unit, count):
-    """'bottle' -> 'bottles'; leaves abbreviations such as 'mL' alone."""
+    """'bottle' -> 'bottles', 'blister pack' -> 'blister packs'; leaves abbreviations such as 'mL' alone."""
     unit = (unit or "").strip()
-    if count == 1 or not unit.isalpha() or not unit.islower() or unit.endswith("s"):
+    if count == 1 or not unit.replace(" ", "").isalpha() or not unit.islower() or unit.endswith("s"):
         return unit
     return unit + ("es" if unit.endswith(("x", "ch", "sh")) else "s")
 
@@ -106,7 +106,12 @@ class App:
 
     def callback_error(self, kind, value, traceback):
         logging.error("UI callback failed", exc_info=(kind, value, traceback))
-        dialogs.showerror("Action failed", f"{value}\nAny unfinished access remains available for reconciliation.", parent=self.root)
+        try:
+            active = self.store.active()
+        except Exception:
+            active = None
+        note = f"\nDrawer {active['compartment']} is unfinished. Open it to finish or count it." if active else ""
+        dialogs.showerror("Action failed", f"{value}{note}", parent=self.root)
 
     # -- Shell ----------------------------------------------------------------
 
@@ -384,17 +389,20 @@ class App:
         actions.pack(side="bottom", fill="x", pady=(px(32), 0))
 
         if active and active["compartment"] == number:
-            caption.configure(text=f"DRAWER {number}  ·  NEEDS COUNT", fg=T.WARNING)
-            label(page, f"Count drawer {number}", "display").pack(anchor="w", pady=(px(8), 0))
-            label(page, f"A {active['kind']} was interrupted. Check what is physically in the drawer, then record "
-                  "what you find. Other drawers stay locked until this is done.", "body", T.TEXT_SOFT,
-                  wraplength=px(560)).pack(anchor="w", pady=(px(10), 0))
+            resumable = self.resumable(active)
+            caption.configure(text=f"DRAWER {number}  ·  {'UNFINISHED' if resumable else 'NEEDS COUNT'}", fg=T.WARNING)
+            label(page, f"Finish the {active['kind']}" if resumable else f"Count drawer {number}", "display").pack(anchor="w", pady=(px(8), 0))
+            detail = ("Confirm it went as recorded to save it, or count the drawer if it did not."
+                      if resumable else "Check what is physically in the drawer, then record what you find.")
+            label(page, f"A {active['kind']} was interrupted. {detail} Other drawers stay locked until this is done.",
+                  "body", T.TEXT_SOFT, wraplength=px(560)).pack(anchor="w", pady=(px(10), 0))
             recorded = json.loads(active["product"])
             if recorded:
                 label(page, f"Recorded: {recorded.get('generic_name', '')}  ·  lot {recorded.get('lot', '')}", "body",
                       T.MUTED, wraplength=px(560)).pack(anchor="w", pady=(px(16), 0))
             if self.role == "admin":
-                self.button(actions, f"Count drawer {number}", self.reconcile, "Warning", large=True).pack(side="left")
+                self.button(actions, f"Finish {active['kind']}" if resumable else f"Count drawer {number}", self.reconcile,
+                            "Warning", large=True).pack(side="left")
             return
 
         if not product:
@@ -680,29 +688,53 @@ class App:
         details.pack(anchor="w", pady=(px(14), 0))
         scan.focus_set()
 
+        def checked(product, items, title="Cannot load"):
+            """Report a problem now, before the operator counts or scans more boxes."""
+            try:
+                self.store.check_load(number, product, self.operator, items=items)
+                return True
+            except ValueError as exc:
+                dialogs.showerror(title, str(exc), parent=self.root)
+                return False
+
         def load():
             product = {key: entry.get() for key, entry in fields.items()}
-            count = dialogs.askinteger("Load quantity", "How many counted units are you adding?", minvalue=1, parent=self.root)
-            if count is None:
-                return
             items = None
             if scanned[0]:
                 first = scanned[0]
-                if scan.get().strip() != first["original_scan"] or not self.catalog.matches(first["original_scan"], product["ndc"]):
+                try:
+                    same = scan.get().strip() == first["original_scan"] and self.catalog.matches(first["original_scan"], product["ndc"])
+                except ValueError:
+                    same = False
+                if not same:
                     dialogs.showerror("Package identity", "Use the scan again and confirm the package details.", parent=self.root)
                     return
                 items = [{"product": product, "scan": first["original_scan"], "package_ndc": identifier(product["ndc"])}]
+            if not checked(product, items):
+                return
+            count = dialogs.askinteger("Load quantity", f"How many {plural(product['unit'] or 'unit', 2)} are you adding "
+                                       f"to drawer {number}?", minvalue=1, parent=self.root)
+            if count is None:
+                return
+            if items:
                 for index in range(1, count):
                     next_scan = dialogs.askstring("Scan each unit", f"Scan package {index + 1} of {count} before loading.",
                                                   parent=self.root, scan=True)
                     if next_scan is None:
                         return
-                    if not self.catalog.matches(next_scan, product["ndc"]):
+                    try:
+                        same = self.catalog.matches(next_scan, product["ndc"])
+                    except ValueError:
+                        same = False
+                    if not same:
                         dialogs.showerror("Different package", "All units must have the same package identity.", parent=self.root)
                         return
                     parsed = read_scan(next_scan)
                     item_product = {**product, **{k: parsed[k] for k in ("lot", "expiry_date") if parsed[k]}}
-                    items.append({"product": item_product, "scan": next_scan, "package_ndc": identifier(product["ndc"])})
+                    item = {"product": item_product, "scan": next_scan, "package_ndc": identifier(product["ndc"])}
+                    if not checked(product, items + [item], f"Package {index + 1} of {count}"):
+                        return
+                    items.append(item)
 
             def opened(operation):
                 if not dialogs.askyesno("Confirm placement", f"Place exactly {count} {product['unit']} of the verified product and lot "
@@ -789,6 +821,12 @@ class App:
             return
         self.start_access("manual", number, 0, {}, lambda op: self.abandon(op, "Manual inspection requires a count"), reason)
 
+    def resumable(self, active):
+        """An interrupted access whose outcome the records already describe:
+        confirming it saves normally, with no count."""
+        return (active and active["state"] == "access" and active["kind"] in ("load", "dispense", "unload")
+                and (active["kind"] != "dispense" or active["verified"] == active["requested"]))
+
     def reconcile(self):
         active = self.store.active()
         if not active:
@@ -796,6 +834,16 @@ class App:
             return
         self.context = f"Drawer {active['compartment']}"
         product = json.loads(active["product"])
+        if self.resumable(active):
+            count, unit = active["requested"], product.get("unit", "")
+            question = {
+                "dispense": f"All {count} scanned. Have exactly {count} {unit} been removed?",
+                "load": f"Have exactly {count} {unit} been placed in drawer {active['compartment']}?",
+                "unload": "Have all contents been removed and the drawer checked empty?",
+            }[active["kind"]]
+            if dialogs.askyesno(f"Finish {active['kind']}", question, parent=self.root, yes="Yes, finish", no="No, count drawer"):
+                self.complete(active["id"])
+                return
         candidates = self.store.reconciliation_items(active["id"])
         remaining_ids = None
         if any(i["serial"] for i in candidates) or len({json.dumps(i["product"], sort_keys=True) for i in candidates}) > 1:
@@ -814,8 +862,8 @@ class App:
                                        "Remove anything else first.", minvalue=0, parent=self.root)
             if count is None:
                 return
-        reason = dialogs.askstring("Count drawer", "What happened? This is recorded in the audit log.", parent=self.root)
-        if not reason:
+        reason = dialogs.askstring("Count drawer", "What happened? This is recorded in the audit log. (Optional)", parent=self.root)
+        if reason is None:
             return
         if not dialogs.askyesno("Closure", "Have you verified the product/lot and physically closed all four drawers?", parent=self.root):
             return
@@ -893,7 +941,7 @@ class App:
         self.root.destroy()
 
 
-def choose_usb_port(root, team=False):
+def choose_usb_port(root):
     """Select explicitly. Enumeration is read-only; selection does not open the port."""
     theme = T.apply_theme(root)
     px = theme.px
@@ -927,15 +975,10 @@ def choose_usb_port(root, team=False):
             choices["values"] = []
             notice.set(str(exc))
 
-    ready = tk.BooleanVar(value=False)
-    ttk.Checkbutton(frame, text=("Team pressure-sensor firmware is installed and its wiring is verified." if team else
-                                 "Updated MAS/1 firmware is installed and the wiring is verified for bench testing."),
-                    variable=ready, style="Check.TCheckbutton").pack(anchor="w", pady=(px(14), 0))
-
     def select():
         index = choices.current()
-        if index < 0 or index >= len(ports) or not ready.get():
-            dialogs.showerror("USB setup", "Select a port and confirm bench preparation first.", parent=dialog)
+        if index < 0 or index >= len(ports):
+            dialogs.showerror("USB setup", "Select a port first.", parent=dialog)
             return
         selected.append(ports[index][0])
         dialog.destroy()
@@ -1071,7 +1114,7 @@ def main(argv=None):
     size_window(root)
     if args.usb or args.team_usb:
         root.withdraw()
-        port = choose_usb_port(root, team=args.team_usb)
+        port = choose_usb_port(root)
         if port is None:
             root.destroy()
             return

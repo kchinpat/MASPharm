@@ -31,16 +31,25 @@ def medicine(value):
     for key in ("generic_name", "ndc", "lot", "expiry_date", "unit"):
         if not result[key]:
             raise ValueError(f"{key.replace('_', ' ').capitalize()} is required.")
+    if re.fullmatch(r"[\d.,\s]+", result["unit"]):
+        raise ValueError("Unit type is what one item is, such as bottle or box. Enter the quantity when loading.")
     result["ndc"] = identifier(result["ndc"])
+    unexpired(result)
+    return result
+
+
+def unexpired(product):
+    """The expiry part of `medicine`, rechecked when saving. Form rules such as the
+    unit wording are only enforced on entry, so older records still save."""
     try:
-        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", result["expiry_date"]):
+        value = str(product.get("expiry_date") or "")
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
             raise ValueError("Expected YYYY-MM-DD")
-        expiry = date.fromisoformat(result["expiry_date"])
+        expiry = date.fromisoformat(value)
     except ValueError as exc:
         raise ValueError("Enter the actual package expiration as YYYY-MM-DD.") from exc
     if expiry < date.today():
         raise ValueError("Expired stock cannot be loaded or dispensed.")
-    return result
 
 
 class ClosingConnection(sqlite3.Connection):
@@ -221,6 +230,22 @@ class Store:
         return row
 
     def begin(self, kind, compartment, count, product, operator, reason="", items=None):
+        with self.transaction() as db:
+            return self._begin(db, kind, compartment, count, product, operator, reason, items)
+
+    def check_load(self, compartment, product, operator, items=None):
+        """Run every load check without recording anything, so errors surface
+        before the operator counts or scans further boxes."""
+        db = self.connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            count = len(items) if isinstance(items, list) else 1
+            self._begin(db, "load", compartment, count, product, operator, "", items)
+        finally:
+            db.rollback()
+            db.close()
+
+    def _begin(self, db, kind, compartment, count, product, operator, reason, items):
         if not isinstance(reason, str):
             raise ValueError("Provide a text reason.")
         if kind not in ("load", "dispense", "unload", "manual"):
@@ -231,45 +256,44 @@ class Store:
             positive(count)
         if items is not None and (kind != "load" or not isinstance(items, list) or len(items) != count):
             raise ValueError("Supply one package record for each loaded unit.")
-        with self.transaction() as db:
-            self._role(db, operator, admin=kind in ("load", "unload", "manual"))
-            if kind == "manual" and not reason.strip():
-                raise ValueError("A reason is required for manual access.")
-            if db.execute("SELECT 1 FROM operations WHERE state IN ('pending','access','reconciliation')").fetchone():
-                raise ValueError("Complete or reconcile the outstanding operation first.")
-            row = db.execute("SELECT * FROM compartments WHERE id=?", (compartment,)).fetchone()
-            old = json.loads(row["product"])
-            if kind == "load":
-                product = medicine(product)
-                keys = ("ndc", "unit", "generic_name") if items is not None else ("ndc", "lot", "expiry_date", "unit", "generic_name")
-                if row["quantity"] and any(product[k] != old.get(k) for k in keys):
-                    raise ValueError("Top-ups must match product, lot, expiration, name, and unit. Unload first.")
-            else:
-                product = old
-            if kind == "dispense":
-                if count > row["quantity"]:
-                    raise ValueError("Insufficient stock.")
-                available = [r for r in db.execute("SELECT * FROM stock_items WHERE compartment=?", (compartment,))
-                             if json.loads(r["product"])["expiry_date"] >= date.today().isoformat()]
-                if len(available) < count:
-                    raise ValueError("Not enough unexpired stock. Unload or reconcile expired packages first.")
-                # The operation snapshot describes the first eligible package.
-                product = json.loads(available[0]["product"])
-            if kind == "unload":
-                if not row["quantity"]:
-                    raise ValueError("Compartment is already empty.")
-                count = row["quantity"]
-            if kind == "manual":
-                count = 0
-            op = uuid.uuid4().hex
-            db.execute("INSERT INTO operations(id,compartment,kind,requested,product,state,operator,reason,created) "
-                       "VALUES (?,?,?,?,?,'pending',?,?,?)",
-                       (op, compartment, kind, count, json.dumps(product), operator, reason, timestamp()))
-            self._event(db, operator, op, "requested", f"{kind}: compartment {compartment}, count {count}; {reason}")
-            if kind == "load":
-                for item in items if items is not None else [{"product": product, "scan": ""}] * count:
-                    self._stage_load(db, op, item, product)
-            return op
+        self._role(db, operator, admin=kind in ("load", "unload", "manual"))
+        if kind == "manual" and not reason.strip():
+            raise ValueError("A reason is required for manual access.")
+        if db.execute("SELECT 1 FROM operations WHERE state IN ('pending','access','reconciliation')").fetchone():
+            raise ValueError("Complete or reconcile the outstanding operation first.")
+        row = db.execute("SELECT * FROM compartments WHERE id=?", (compartment,)).fetchone()
+        old = json.loads(row["product"])
+        if kind == "load":
+            product = medicine(product)
+            keys = ("ndc", "unit", "generic_name") if items is not None else ("ndc", "lot", "expiry_date", "unit", "generic_name")
+            if row["quantity"] and any(product[k] != old.get(k) for k in keys):
+                raise ValueError("Top-ups must match product, lot, expiration, name, and unit. Unload first.")
+        else:
+            product = old
+        if kind == "dispense":
+            if count > row["quantity"]:
+                raise ValueError("Insufficient stock.")
+            available = [r for r in db.execute("SELECT * FROM stock_items WHERE compartment=?", (compartment,))
+                         if json.loads(r["product"])["expiry_date"] >= date.today().isoformat()]
+            if len(available) < count:
+                raise ValueError("Not enough unexpired stock. Unload or reconcile expired packages first.")
+            # The operation snapshot describes the first eligible package.
+            product = json.loads(available[0]["product"])
+        if kind == "unload":
+            if not row["quantity"]:
+                raise ValueError("Compartment is already empty.")
+            count = row["quantity"]
+        if kind == "manual":
+            count = 0
+        op = uuid.uuid4().hex
+        db.execute("INSERT INTO operations(id,compartment,kind,requested,product,state,operator,reason,created) "
+                   "VALUES (?,?,?,?,?,'pending',?,?,?)",
+                   (op, compartment, kind, count, json.dumps(product), operator, reason, timestamp()))
+        self._event(db, operator, op, "requested", f"{kind}: compartment {compartment}, count {count}; {reason}")
+        if kind == "load":
+            for item in items if items is not None else [{"product": product, "scan": ""}] * count:
+                self._stage_load(db, op, item, product)
+        return op
 
     def _stage_load(self, db, operation, item, expected):
         if not isinstance(item, dict):
@@ -372,13 +396,13 @@ class Store:
             if row["kind"] == "load":
                 staged = list(db.execute("SELECT * FROM operation_items WHERE operation=?", (operation,)))
                 for item in staged:
-                    medicine(json.loads(item["product"]))
+                    unexpired(json.loads(item["product"]))
                     db.execute("INSERT INTO stock_items VALUES (?,?,?,?,?,?)",
                                (item["id"], row["compartment"], item["product"], item["scan"], item["gtin"], item["serial"]))
             elif row["kind"] == "dispense":
                 # Recheck expiry at completion, including sessions crossing midnight.
                 for item in db.execute("SELECT * FROM operation_items WHERE operation=?", (operation,)):
-                    medicine(json.loads(item["product"]))
+                    unexpired(json.loads(item["product"]))
                 db.execute("DELETE FROM stock_items WHERE id IN (SELECT id FROM operation_items WHERE operation=?)", (operation,))
             else:
                 db.execute("DELETE FROM stock_items WHERE compartment=?", (row["compartment"],))
@@ -395,8 +419,8 @@ class Store:
         self._event(db, operator, row["id"], state, f"Remaining count {quantity}. {reason}")
 
     def reconcile(self, operation, count, operator, reason, closed=False, remaining_ids=None):
-        if type(count) is not int or count < 0 or not reason.strip() or closed is not True:
-            raise ValueError("Provide a nonnegative physical count, reason, and closure confirmation.")
+        if type(count) is not int or count < 0 or not isinstance(reason, str) or closed is not True:
+            raise ValueError("Provide a nonnegative physical count and closure confirmation.")
         with self.transaction() as db:
             self._role(db, operator, admin=True)
             row = self._operation(db, operation, operator)

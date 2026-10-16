@@ -137,6 +137,39 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(2, self.app.store.compartments()[0]["quantity"])
         self.assertIsNone(self.app.store.active())
 
+    def test_interrupted_verified_dispense_finishes_without_count(self):
+        op = self.app.store.begin("dispense", 1, 1, {}, "admin")
+        self.app.store.access(op, "admin")
+        self.app.store.verify_one(op, "admin")
+        with patch("pharm.app.dialogs.askinteger") as count:
+            self.app.reconcile()
+        count.assert_not_called()
+        self.assertEqual(2, self.app.store.compartments()[0]["quantity"])
+        self.assertIsNone(self.app.store.active())
+        self.assertEqual(["Finish dispense", "Confirm closure"], [call.args[0] for call in self.messages.askyesno.call_args_list])
+
+    def test_declining_finish_falls_back_to_count(self):
+        op = self.app.store.begin("dispense", 1, 1, {}, "admin")
+        self.app.store.access(op, "admin")
+        self.app.store.verify_one(op, "admin")
+        self.messages.askyesno.side_effect = [False, True]
+        with patch("pharm.app.dialogs.askinteger", return_value=3), \
+             patch("pharm.app.dialogs.askstring", return_value="Nothing was removed"):
+            self.app.reconcile()
+        self.assertEqual(3, self.app.store.compartments()[0]["quantity"])
+        self.assertIsNone(self.app.store.active())
+
+    def test_stock_saved_before_unit_rule_still_dispenses(self):
+        legacy = json.dumps({**PRODUCT, "unit": "1"})
+        with self.app.store.connect() as db:
+            db.execute("UPDATE stock_items SET product=?", (legacy,))
+            db.execute("UPDATE compartments SET product=? WHERE id=1", (legacy,))
+        with patch("pharm.app.dialogs.askinteger", return_value=1), \
+             patch("pharm.app.dialogs.askstring", return_value="0123456789"):
+            self.app.dispense(1)
+        self.assertEqual(2, self.app.store.compartments()[0]["quantity"])
+        self.assertIsNone(self.app.store.active())
+
     def test_valid_catalog_selection_persists_across_startup(self):
         path = Path(self.temp.name) / "packages.json"
         path.write_text(json.dumps([{"generic_name": "SYNTHETIC",

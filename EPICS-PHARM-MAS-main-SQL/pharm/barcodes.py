@@ -85,9 +85,30 @@ def read_scan(value):
             "expiry_date": expiry_date(fields["17"]) if "17" in fields else ""}
 
 
+def drug_ndc(code):
+    """The 10-digit NDC inside a US drug UPC-A, EAN-13 or GTIN-14, or "".
+
+    UPC number system 3 (GTIN "003") is reserved for NDCs. Only indicator 0, the
+    package itself, is decoded, and the GS1 check digit must agree.
+    """
+    if not re.fullmatch(r"[0-9]{12,14}", code):
+        return ""
+    gtin = code.zfill(14)
+    total = sum(int(digit) * (1 if position % 2 else 3) for position, digit in enumerate(gtin[:13]))
+    return gtin[3:13] if gtin.startswith("003") and -total % 10 == int(gtin[13]) else ""
+
+
 def aliases(scan):
     codes = [scan["code"]]
     # GTIN-14 with indicator 0 and UPC-A padding 0 explicitly represents UPC-A.
     if scan["gtin"].startswith("00"):
         codes.append(scan["gtin"][2:])
+    # Catalogs list UPCs as EAN-13: a GTIN-14 minus its indicator 0, or UPC-A plus one padding 0.
+    if re.fullmatch(r"0[0-9]{13}", scan["code"]):
+        codes.append(scan["code"][1:])
+    elif re.fullmatch(r"[0-9]{12}", scan["code"]):
+        codes.append("0" + scan["code"])
+    ndc = drug_ndc(scan["code"])
+    if ndc:
+        codes.append(ndc)
     return codes

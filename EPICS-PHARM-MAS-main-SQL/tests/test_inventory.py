@@ -83,6 +83,17 @@ class InventoryTests(unittest.TestCase):
         self.load(2)
         self.assertEqual(6, self.store.compartments()[0]["quantity"])
 
+    def test_load_check_reports_errors_without_recording_anything(self):
+        events = len(self.store.audit())
+        self.store.check_load(1, PRODUCT, "admin")
+        with self.assertRaisesRegex(ValueError, "Generic name is required"):
+            self.store.check_load(1, {**PRODUCT, "generic_name": ""}, "admin")
+        self.assertIsNone(self.store.active())
+        self.assertEqual(events, len(self.store.audit()))
+        self.load(1)
+        with self.assertRaisesRegex(ValueError, "Top-ups must match"):
+            self.store.check_load(1, {**PRODUCT, "lot": "other"}, "admin")
+
     def test_cancel_before_access_preserves_stock(self):
         op = self.store.begin("load", 1, 2, PRODUCT, "admin")
         self.store.cancel(op, "admin", "Cancelled before access")
@@ -162,6 +173,12 @@ class InventoryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.reconcile(op, 1, "admin", "Unknown stock", closed=True)
         self.store.reconcile(op, 0, "admin", "Empty and secured", closed=True)
+
+    def test_reconcile_reason_is_optional(self):
+        op = self.store.begin("manual", 1, 0, {}, "admin", "Inspect empty compartment")
+        self.store.access(op, "admin")
+        self.store.reconcile(op, 0, "admin", "", closed=True)
+        self.assertEqual("reconciled", self.store.operation(op)["state"])
 
     def test_audit_is_append_only(self):
         self.load()

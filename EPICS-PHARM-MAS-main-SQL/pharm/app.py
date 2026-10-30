@@ -5,11 +5,12 @@ and one work panel on the right. Selecting a drawer shows what is in it and
 what you can do; workflows then run there one guided step at a time.
 """
 import argparse
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 import csv
 from datetime import date
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import sys
@@ -31,7 +32,7 @@ from .barcodes import read_scan  # noqa: E402
 from .catalog import identifier  # noqa: E402
 from .team_hardware import TeamSerialHardware  # noqa: E402
 from .photos import cached, fetch_photo  # noqa: E402
-from .widgets import ScrollFrame, Splash, divider, label, set_window_icon  # noqa: E402
+from .widgets import Progress, ScrollFrame, Splash, divider, label, set_window_icon  # noqa: E402
 
 # key, label, columns spanned, optional (hidden under "More details")
 FIELDS = (
@@ -45,6 +46,15 @@ FIELDS = (
     ("labeler_name", "Labeler", 1, True),
 )
 
+# Cabinet steps show their progress for at least this long, so the bar can be
+# read even when the device answers at once.
+PROGRESS_SECONDS = 0.8
+# Expected seconds for a step until one has been timed. A new USB connection
+# waits 2 s for the board to reset before its handshake.
+HARDWARE_ESTIMATE = 3.0
+# How often a drawer showing a label photo still downloading checks for it.
+PHOTO_POLL_MS = 250
+
 
 def plural(unit, count):
     """'bottle' -> 'bottles', 'blister pack' -> 'blister packs'; leaves abbreviations such as 'mL' alone."""
@@ -56,6 +66,11 @@ def plural(unit, count):
 
 def expiry_days(expiry):
     return (date.fromisoformat(expiry) - date.today()).days
+
+
+def time_left(seconds):
+    seconds = max(1, math.ceil(seconds))
+    return f"About {seconds} second{'' if seconds == 1 else 's'} left"
 
 
 def expiry_note(expiry):
@@ -77,9 +92,12 @@ class App:
         self.role = None
         self.busy = False
         self.executor = ThreadPoolExecutor(max_workers=1)
+        self.estimates = {}  # step kind -> expected seconds
         self.theme = T.apply_theme(root)
         self.px = self.theme.px
         self.photos = []
+        self.photo_jobs = {}  # package identifier -> its label photo download this session
+        self.photo_lock = threading.Lock()
         self.load_form = None
         self.view = None
         self.selected = 1
@@ -166,7 +184,8 @@ class App:
 
     def main_menu(self):
         return (("Unlock a drawer...", self.manual),
-                ("Device status", lambda: self.device(self.hardware.status, lambda r: None)),
+                ("Device status", lambda: self.device(self.hardware.status, lambda r: None,
+                                                      "Checking the cabinet", "status")),
                 None,
                 ("Choose catalog...", self.choose_catalog),
                 ("Export audit...", self.export_audit),
@@ -235,24 +254,55 @@ class App:
                 command()
         return ttk.Button(parent, text=text, command=guarded, style=self.theme.button_style(kind, under, large), **kwargs)
 
-    def device(self, action, done):
+    def device(self, action, done, title="Waiting for the cabinet", kind="device"):
+        """Run `action` off the UI thread behind a progress screen over the work
+        panel, so nothing beneath it can be edited or scanned into until it ends.
+        The time left comes from how long earlier steps of the same kind took."""
         self.busy = True
         self.status_text.set("Waiting for device response...")
         self.root.configure(cursor="watch")
+        focus = self.root.focus_get()
+        self.scan.state(["disabled"])
+        progress = Progress(self.panel, title, self.context)
+        estimate = self.estimates.get(kind, 0.0 if isinstance(self.hardware, Simulator) else HARDWARE_ESTIMATE)
+        expected = max(PROGRESS_SECONDS, estimate)
+        started = time.monotonic()
+        took = []
         future = self.executor.submit(action)
 
         def poll():
-            if not future.done():
-                self.root.after(50, poll)
+            elapsed = time.monotonic() - started
+            if future.done() and not took:
+                took.append(elapsed)
+            if took and elapsed >= PROGRESS_SECONDS:
+                finish()
                 return
+            if took:  # Answered early: the bar catches up before the next step.
+                progress.show(elapsed / PROGRESS_SECONDS, time_left(PROGRESS_SECONDS - elapsed))
+            elif elapsed < expected:
+                progress.show(0.9 * elapsed / expected, time_left(expected - elapsed))
+            else:
+                progress.show(0.9 + 0.09 * (1 - math.exp((expected - elapsed) / expected)),
+                              "Taking longer than usual. Please wait.")
+            self.root.after(50, poll)
+
+        def finish():
+            progress.destroy()
             self.busy = False
             self.root.configure(cursor="")
+            if not self.prompt:
+                self.scan.state(["!disabled"])
+            if focus is not None and focus.winfo_exists():
+                focus.focus_set()
             try:
                 result = future.result()
             except Exception as exc:
                 result = Result(False, str(exc))
+            if result.ok:
+                self.estimates[kind] = took[0] if kind not in self.estimates else (self.estimates[kind] + took[0]) / 2
             self.status_text.set(result.message)
             done(result)
+        progress.show(0, time_left(expected))
         self.root.after(50, poll)
 
     # -- Guided steps: pharm.dialogs renders prompts in the work panel --------
@@ -276,7 +326,8 @@ class App:
         prompt.overlay.destroy()
         if self.prompt is prompt:
             self.prompt = None
-            self.scan.state(["!disabled"])
+            if not self.busy:
+                self.scan.state(["!disabled"])
 
     # -- Cabinet --------------------------------------------------------------
 
@@ -296,6 +347,10 @@ class App:
             self.selected = active["compartment"]
         self.draw_cabinet(compartments, active)
         self.drawer_panel(compartments[self.selected - 1], active)
+        # The other drawers' label photos download behind the selected one's.
+        for drawer in compartments:
+            if drawer["product"]:
+                self.background_photo(drawer["product"]["ndc"])
         self.notify()
         if not self.prompt:
             self.scan.focus_set()
@@ -407,8 +462,8 @@ class App:
 
         if not product:
             label(page, "Empty", "display", T.FAINT).pack(anchor="w", pady=(px(8), 0))
-            label(page, "Nothing is in this drawer. Load it before dispensing.", "body",
-                  T.MUTED).pack(anchor="w", pady=(px(8), 0))
+            label(page, "Nothing is in this drawer. Load it before dispensing.", "prompt",
+                  T.MUTED, wraplength=px(560)).pack(anchor="w", pady=(px(12), 0))
             # Dispense keeps its place on every drawer; it is unavailable until the drawer holds stock.
             dispense = self.button(actions, "Dispense", lambda: None, "Primary", large=True, width=-12)
             dispense.state(["disabled"])
@@ -464,20 +519,43 @@ class App:
         self.blocked_note(page, active)
 
     def label_photo(self, page, number, product):
-        """The package label photo (click to enlarge), or a quiet slot offering to download one."""
+        """The package label photo (click to enlarge). One not saved yet downloads
+        in the background and appears here when it arrives."""
+        holder = tk.Frame(page, bg=T.SURFACE)
+        holder.pack(anchor="w", pady=(self.px(20), 0))
+        self.draw_photo(holder, number, product)
+
+    def draw_photo(self, holder, number, product):
         px = self.px
+        for widget in holder.winfo_children():
+            widget.destroy()
+        job = self.background_photo(product["ndc"])
+        waiting = job is not None and not job.done()  # read before the cache: the download may land in between
         image = self.photo(product["ndc"], px(520), px(150))
         if not image:
-            slot = ttk.Frame(page, style=self.theme.frame_style("PhotoSlot.TFrame", T.SUBTLE, T.SURFACE),
+            slot = ttk.Frame(holder, style=self.theme.frame_style("PhotoSlot.TFrame", T.SUBTLE, T.SURFACE),
                              padding=(px(18), px(10)))
-            slot.pack(anchor="w", pady=(px(20), 0))
-            label(slot, "No label photo saved", "body", T.MUTED, bg=T.SUBTLE).pack(side="left")
-            self.button(slot, "Download photo", lambda: self.package_photo(number), "Ghost",
-                        under=T.SUBTLE).pack(side="left", padx=(px(10), 0))
+            slot.pack(anchor="w")
+            label(slot, "Downloading the label photo..." if waiting else "No label photo available", "body", T.MUTED,
+                  bg=T.SUBTLE).pack(side="left")
+            if waiting:
+                def arrived():
+                    if not holder.winfo_exists():
+                        return
+                    if job.done():
+                        self.draw_photo(holder, number, product)
+                    else:
+                        self.root.after(PHOTO_POLL_MS, arrived)
+                self.root.after(PHOTO_POLL_MS, arrived)
+            elif job is not None:
+                def retry():
+                    self.photo_jobs.pop(identifier(product["ndc"]), None)
+                    self.draw_photo(holder, number, product)
+                self.button(slot, "Try again", retry, "Ghost", under=T.SUBTLE).pack(side="left", padx=(px(10), 0))
             return
-        frame = ttk.Frame(page, style=self.theme.frame_style("Photo.TFrame", T.SURFACE, T.SURFACE, outline=T.BORDER),
+        frame = ttk.Frame(holder, style=self.theme.frame_style("Photo.TFrame", T.SURFACE, T.SURFACE, outline=T.BORDER),
                           padding=px(10), cursor="hand2")
-        frame.pack(anchor="w", pady=(px(20), 0))
+        frame.pack(anchor="w")
         picture = tk.Label(frame, image=image, bg=T.SURFACE, bd=0, cursor="hand2")
         picture.pack()
 
@@ -535,12 +613,38 @@ class App:
         image = self.photo(product["ndc"], self.px(680), self.px(420))
         if image:
             dialogs.showimage("Package photo", product["generic_name"], image, parent=self.root)
-        elif dialogs.askyesno("Package photo", "No photo is saved for this package. Download one from DailyMed?",
-                              parent=self.root, yes="Download", no="Cancel"):
-            self.fetch_photo(number)
+
+    def saved_photo(self, ndc):
+        return cached(self.store.path.parent / "images", ndc) or cached(ROOT / "UI/images", ndc)
+
+    def background_photo(self, ndc):
+        """Download a package's label photo off the UI thread, once per package
+        per session. Returns the download, or None when a photo is already saved
+        or the package ID cannot have one. Inventory never waits on it."""
+        try:
+            key = identifier(ndc)
+        except ValueError:
+            return None
+        if self.saved_photo(ndc):
+            return None
+        job = self.photo_jobs.get(key)
+        if job is None:
+            job = self.photo_jobs[key] = Future()
+            download, directory = fetch_photo, self.store.path.parent / "images"
+
+            def fetch():
+                with self.photo_lock:  # one DailyMed request at a time
+                    try:
+                        job.set_result(download(directory, ndc))
+                    except Exception as exc:
+                        logging.info("No label photo for %s: %s", ndc, exc)
+                        job.set_exception(exc)
+            # A daemon thread: closing the window never waits for DailyMed.
+            threading.Thread(target=fetch, daemon=True).start()
+        return job
 
     def photo(self, ndc, width, height):
-        path = cached(self.store.path.parent / "images", ndc) or cached(ROOT / "UI/images", ndc)
+        path = self.saved_photo(ndc)
         if not path:
             return None
         try:
@@ -577,22 +681,26 @@ class App:
                 self.home()
             else:
                 done(operation)
-        self.device(lambda: self.hardware.open(number), opened)
+        self.device(lambda: self.hardware.open(number), opened, f"Unlocking drawer {number}", "open")
 
     def abandon(self, operation, reason):
         self.store.cancel(operation, self.operator, reason)
         dialogs.showwarning("Reconciliation required", "Inventory has not been finalized. Inspect "
-                            "the contents and confirm closure before further operations.", parent=self.root)
+                            "the contents and count the drawer before further operations.", parent=self.root)
         self.home()
 
     def complete(self, operation):
-        if not dialogs.askyesno("Confirm closure", "Close the selected drawer. Have you confirmed it is closed?",
-                                parent=self.root):
-            self.abandon(operation, "Closure was not confirmed")
-            return
-
         self.store.finish(operation, self.operator, closed=True)
         self.lock_after_save()
+
+    def when_done(self, operation, number, task):
+        """Nothing senses when the operator has finished with an open drawer, so
+        one press says so. Locking sooner would end the release while in use."""
+        if dialogs.askyesno(f"Drawer {number} is open", f"{task}, close the drawer, then press Done.",
+                            parent=self.root, yes="Done", no="Cancel"):
+            self.complete(operation)
+        else:
+            self.abandon(operation, f"Cancelled while drawer {number} was open")
 
     def lock_after_save(self):
         """Request locking after saving; a device failure does not undo inventory."""
@@ -601,7 +709,7 @@ class App:
             if not result.ok:
                 dialogs.showwarning("Inventory saved", "The inventory update was saved, but the lock request failed: " + result.message, parent=self.root)
             self.home()
-        self.device(self.hardware.lock, locked)
+        self.device(self.hardware.lock, locked, "Inventory saved. Locking the drawers", "lock")
 
     def loading(self, number):
         self.clear()
@@ -644,6 +752,8 @@ class App:
                     entry.delete(0, "end")
                     entry.insert(0, product.get(key, ""))
                 self.hint(notice)
+                # Ready by the time the drawer is loaded and shown.
+                self.background_photo(product.get("ndc", ""))
             except ValueError as exc:
                 dialogs.showerror("Lookup", str(exc), parent=self.root)
         lookup = self.button(row, "Look up", search)
@@ -737,11 +847,7 @@ class App:
                     items.append(item)
 
             def opened(operation):
-                if not dialogs.askyesno("Confirm placement", f"Place exactly {count} {product['unit']} of the verified product and lot "
-                                        f"in drawer {number}. Is placement complete?", parent=self.root):
-                    self.abandon(operation, "Placement not confirmed")
-                    return
-                self.complete(operation)
+                self.when_done(operation, number, f"Place the {count} {plural(product['unit'] or 'unit', count)}")
             self.start_access("load", number, count, product, opened, items=items)
 
         footer = tk.Frame(page, bg=T.SURFACE)
@@ -762,14 +868,15 @@ class App:
             return
 
         def opened(operation):
-            for index in range(self.store.operation(operation)["verified"], count):
+            index, error = self.store.operation(operation)["verified"], ""
+            while index < count:
                 scan = dialogs.askstring("Verify package", f"Scan item {index + 1} of {count}: {product['generic_name']} "
                                          f"({product['ndc']}). Submit an empty scan to request drawer access again.",
-                                         parent=self.root, scan=True)
-                if scan is not None and not scan.strip():
-                    if not dialogs.askyesno("Reopen drawer", "Request one new access command for this drawer?", parent=self.root):
-                        self.abandon(operation, "Reopening cancelled")
-                        return
+                                         parent=self.root, scan=True, error=error)
+                if scan is None:
+                    self.abandon(operation, f"Scan cancelled after {index} verified items")
+                    return
+                if not scan.strip():
                     number = self.store.note_reopen(operation, self.operator)
 
                     def reopened(result):
@@ -779,21 +886,18 @@ class App:
                             self.abandon(operation, result.message)
                     self.device(lambda: self.hardware.open(number), reopened)
                     return
+                # A misread or a different box is rejected and scanned again;
+                # only a verified scan counts toward the units removed.
                 try:
-                    valid = scan is not None and self.catalog.matches(scan, product["ndc"])
-                except ValueError:
-                    valid = False
-                if not valid:
-                    self.abandon(operation, f"Scan cancelled or mismatched after {index} verified items")
-                    return
-                try:
+                    if not self.catalog.matches(scan, product["ndc"]):
+                        raise ValueError("This is a different package.")
                     self.store.verify_one(operation, self.operator, scan, package_ndc=identifier(product["ndc"]))
                 except ValueError as exc:
-                    self.abandon(operation, str(exc))
-                    return
-            if not dialogs.askyesno("Confirm removal", f"Have exactly {count} {product['unit']} been removed?", parent=self.root):
-                self.abandon(operation, "Removal count uncertain")
-                return
+                    logging.warning("Rejected verification scan %r: %s", scan, exc)
+                    error = f"{exc} Scan the box again."
+                    continue
+                index, error = index + 1, ""
+            # Every unit was scanned as it was removed, which is the count.
             self.complete(operation)
         self.start_access("dispense", number, count, {}, opened)
 
@@ -803,12 +907,7 @@ class App:
                                 yes="Unload drawer", no="Cancel", danger=True):
             return
 
-        def opened(operation):
-            if dialogs.askyesno("Confirm empty", "Have all contents been removed and the drawer checked empty?", parent=self.root):
-                self.complete(operation)
-            else:
-                self.abandon(operation, "Unload incomplete")
-        self.start_access("unload", number, 0, {}, opened)
+        self.start_access("unload", number, 0, {}, lambda operation: self.when_done(operation, number, "Remove everything"))
 
     def manual(self):
         self.context = ""
@@ -865,9 +964,6 @@ class App:
         reason = dialogs.askstring("Count drawer", "What happened? This is recorded in the audit log. (Optional)", parent=self.root)
         if reason is None:
             return
-        if not dialogs.askyesno("Closure", "Have you verified the product/lot and physically closed all four drawers?", parent=self.root):
-            return
-
         self.store.reconcile(active["id"], count, self.operator, reason, closed=True, remaining_ids=remaining_ids)
         self.lock_after_save()
 
@@ -877,19 +973,6 @@ class App:
         rows = [(i["product"]["lot"], i["product"]["expiry_date"], i["serial"] or "not recorded") for i in items]
         dialogs.showrecords("Box records", ("Lot", "Expires", "Serial"), rows, parent=self.root,
                             message=f"{len(rows)} recorded {'box' if len(rows) == 1 else 'boxes'}")
-
-    def fetch_photo(self, number):
-        product = self.store.compartments()[number - 1]["product"]
-        if not product:
-            return
-
-        def fetch():
-            try:
-                fetch_photo(self.store.path.parent / "images", product["ndc"])
-                return Result(True, "Reference photo downloaded. It does not identify inventory.")
-            except Exception as exc:
-                return Result(False, f"Optional photo unavailable: {exc}")
-        self.device(fetch, lambda result: self.home())
 
     def export_audit(self):
         path = filedialog.asksaveasfilename(parent=self.root, defaultextension=".csv", filetypes=[("CSV", "*.csv")])
@@ -933,9 +1016,7 @@ class App:
         if self.busy:
             dialogs.showinfo("Please wait", "Wait for the device request to finish before closing.", parent=self.root)
             return
-        if self.store.active() and not dialogs.askyesno("Unfinished operation", "An operation still needs reconciliation. It will remain blocked "
-                                                        "on restart. Close the application?", parent=self.root):
-            return
+        # An unfinished operation is saved and shown again on the next start.
         self.executor.shutdown(wait=False, cancel_futures=True)
         self.hardware.close()
         self.root.destroy()

@@ -23,7 +23,7 @@ class WorkflowTests(unittest.TestCase):
         self.app.catalog = Catalog(Path(self.temp.name) / "absent.json")
         self.app.status_text = type("Status", (), {"set": lambda self, text: None})()
         self.app.home = lambda: None
-        self.app.device = lambda action, done: done(action())
+        self.app.device = lambda action, done, *_: done(action())
         self.dialogs = patch("pharm.app.dialogs")
         self.messages = self.dialogs.start()
         self.messages.askyesno.return_value = True
@@ -43,13 +43,26 @@ class WorkflowTests(unittest.TestCase):
         self.assertIsNone(self.app.store.active())
         self.assertIsNone(self.app.hardware.selected)
 
-    def test_partial_scan_failure_stays_pending(self):
+    def test_cancelled_scan_after_partial_verification_stays_pending(self):
         with patch("pharm.app.dialogs.askinteger", return_value=2), \
-             patch("pharm.app.dialogs.askstring", side_effect=["0123456789", "wrong"]):
+             patch("pharm.app.dialogs.askstring", side_effect=["0123456789", "wrong", None]):
             self.app.dispense(1)
         self.assertEqual("reconciliation", self.app.store.active()["state"])
         self.assertEqual(1, self.app.store.active()["verified"])
         self.assertEqual(3, self.app.store.compartments()[0]["quantity"])
+
+    def test_rejected_scan_is_scanned_again_without_reconciliation(self):
+        scans = ["0123456789", "01234", "]d2garbled", "0123456789"]
+        with patch("pharm.app.dialogs.askinteger", return_value=2), \
+             patch("pharm.app.dialogs.askstring", side_effect=scans) as ask:
+            self.app.dispense(1)
+        self.assertIsNone(self.app.store.active())
+        self.assertEqual(1, self.app.store.compartments()[0]["quantity"])
+        errors = [call.kwargs["error"] for call in ask.call_args_list]
+        self.assertEqual("", errors[0])
+        self.assertIn("different package", errors[2])
+        self.assertIn("Scan the box again", errors[3])
+        self.assertIn("Scan item 2 of 2", ask.call_args_list[3].args[1])
 
     def test_cancelled_quantity_never_requests_hardware(self):
         with patch("pharm.app.dialogs.askinteger", return_value=None):
@@ -108,7 +121,7 @@ class WorkflowTests(unittest.TestCase):
             self.app.dispense(1)
         self.assertIsNone(self.app.store.active())
         self.assertEqual(2, self.app.store.compartments()[0]["quantity"])
-        self.assertEqual(["Confirm removal", "Confirm closure"], [call.args[0] for call in self.messages.askyesno.call_args_list])
+        self.messages.askyesno.assert_not_called()
         self.assertEqual("Inventory saved", self.messages.showwarning.call_args.args[0])
 
     def test_reconcile_saves_without_lock_acknowledgement_or_security_prompt(self):
@@ -121,11 +134,29 @@ class WorkflowTests(unittest.TestCase):
             self.app.reconcile()
         self.assertEqual(2, self.app.store.compartments()[0]["quantity"])
         self.assertIsNone(self.app.store.active())
-        self.assertEqual(["Closure"], [call.args[0] for call in self.messages.askyesno.call_args_list])
+        self.messages.askyesno.assert_not_called()
 
     def test_unload_through_ui(self):
         self.app.unload(1)
         self.assertEqual(0, self.app.store.compartments()[0]["quantity"])
+        self.assertEqual(["Unload", "Drawer 1 is open"], [call.args[0] for call in self.messages.askyesno.call_args_list])
+
+    def test_cancelling_an_open_drawer_needs_a_count(self):
+        self.messages.askyesno.side_effect = [True, False]
+        self.app.unload(1)
+        self.assertEqual("reconciliation", self.app.store.active()["state"])
+        self.assertEqual(3, self.app.store.compartments()[0]["quantity"])
+
+    def test_empty_scan_reopens_without_asking(self):
+        opened = []
+        open_drawer = self.app.hardware.open
+        self.app.hardware.open = lambda number: (opened.append(number), open_drawer(number))[1]
+        with patch("pharm.app.dialogs.askinteger", return_value=1), \
+             patch("pharm.app.dialogs.askstring", side_effect=["", "0123456789"]):
+            self.app.dispense(1)
+        self.assertEqual([1, 1], opened)
+        self.assertEqual(2, self.app.store.compartments()[0]["quantity"])
+        self.messages.askyesno.assert_not_called()
 
     def test_reconcile_through_ui(self):
         op = self.app.store.begin("dispense", 1, 1, {}, "admin")
@@ -146,13 +177,13 @@ class WorkflowTests(unittest.TestCase):
         count.assert_not_called()
         self.assertEqual(2, self.app.store.compartments()[0]["quantity"])
         self.assertIsNone(self.app.store.active())
-        self.assertEqual(["Finish dispense", "Confirm closure"], [call.args[0] for call in self.messages.askyesno.call_args_list])
+        self.assertEqual(["Finish dispense"], [call.args[0] for call in self.messages.askyesno.call_args_list])
 
     def test_declining_finish_falls_back_to_count(self):
         op = self.app.store.begin("dispense", 1, 1, {}, "admin")
         self.app.store.access(op, "admin")
         self.app.store.verify_one(op, "admin")
-        self.messages.askyesno.side_effect = [False, True]
+        self.messages.askyesno.side_effect = [False]
         with patch("pharm.app.dialogs.askinteger", return_value=3), \
              patch("pharm.app.dialogs.askstring", return_value="Nothing was removed"):
             self.app.reconcile()

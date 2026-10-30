@@ -10,8 +10,8 @@ The September 30 combined version adds browser screens, GS1/serial/lot tracking,
 2. The dashboard opens directly with four drawers. No password or account setup is required.
 3. The banner says **SIMULATION**. No lock, light, serial port, or Pi is contacted.
 4. Select a drawer on the left, then choose **Load drawer** (or **Load more**). Enter synthetic details to try the workflow, including package identifier, lot, future actual expiration in `YYYY-MM-DD` format, and counted unit such as `bottle`.
-5. Confirm details, quantity, simulated placement, and closure. Inventory saves without a lock acknowledgement or physical security confirmation. A lock command is requested afterward; failures are displayed without undoing the saved inventory.
-6. Dispense by entering the same package identifier for each counted unit. Leading zeros matter. Cancelling after access or failing a scan leaves a visible reconciliation task.
+5. Enter the quantity. Once the drawer opens, place the stock, close the drawer and press **Done**. Inventory saves without a lock acknowledgement or physical security confirmation. A lock command is requested afterward; failures are displayed without undoing the saved inventory.
+6. Dispense by entering the same package identifier for each counted unit. Leading zeros matter. On the desktop, a scan that cannot be read or does not match a recorded box is rejected in place and can be scanned again; the rejected text is written to `application.log`. Cancelling after access leaves a visible reconciliation task.
 
 Example for testing only: name `SYNTHETIC DEMO`, identifier `0123456789`, lot `DEMO`, expiration `2099-12-31`, unit `bottle`. These are not medication records.
 
@@ -40,7 +40,7 @@ Do not point simulation and hardware sessions at the same data directory. Do not
 
 The laptop uses a shared password-free local session. Loading, dispensing, unloading, manual access, reconciliation, export, and backup are available to anyone using the app. There is no sign-in or user-management screen. Events use `local-workstation`, so they do not establish which staff member performed an action. Existing named accounts and their historical records are preserved but no longer gate laptop access. Machine-to-machine API authentication remains configured separately.
 
-If access is interrupted, the durable pending record remains. Ordinary loading and dispensing are blocked. The operator must inspect the recorded compartment, verify the product and lot, remove any unidentified or unexpected stock, count the remaining units, enter a reason, and confirm closure using **Count drawer**. Reconciliation saves before the lock request and does not require a lock acknowledgement or physical security confirmation. A manual access action always requires a subsequent count.
+If access is interrupted, the durable pending record remains. Ordinary loading and dispensing are blocked. The operator must inspect the recorded compartment, verify the product and lot, remove any unidentified or unexpected stock, count the remaining units and optionally enter a reason using **Count drawer**. Reconciliation saves before the lock request and does not require a lock acknowledgement or physical security confirmation. A manual access action always requires a subsequent count.
 
 Use **Backup** to create a new consistent SQLite backup filename. Use **Export audit** for a CSV copy of events. Neither backs up catalog data or deployment configuration. To restore, close all app instances, retain a copy of the entire current data directory for investigation, and restore the backup as `inventory.sqlite3` into a new data directory. Launch with `--data-dir` targeting that directory. Inspect pending operations and reconcile physical contents before further use. Do not replace a running database or mix old WAL files with a restored database.
 
@@ -108,7 +108,7 @@ These steps are preparation for a controlled bench test. Do not connect the repa
 7. The Waitress server binds to `127.0.0.1:5000`. Provide an HTTPS reverse proxy with a trusted certificate, limited network access, and no unintended public exposure. Provisioning the proxy, Pi service user, and unit file depends on the actual Pi deployment. Run one server process so it owns one serial command queue.
 8. On the desktop, configure `MAS_API_URL=https://your-pi-host`, `MAS_API_KEY`, and optionally `MAS_CA_FILE` for a private CA certificate. Start `python -m pharm.app --hardware-bench`. The ordinary double-click launcher always chooses simulation.
 
-The client verifies TLS, has a bounded request timeout, and never automatically retries a hardware action. All requests use `X-API-Key`. API status checks firmware readiness, but no supplied sensor measures physical lock/door state. A successful response means the firmware acknowledged a command; the UI requires an operator's closure and security confirmations.
+The client verifies TLS, has a bounded request timeout, and never automatically retries a hardware action. All requests use `X-API-Key`. API status checks firmware readiness, but no supplied sensor measures physical lock/door state. A successful response means the firmware acknowledged a command; the operator presses **Done** after closing a drawer that was loaded or emptied.
 
 Supported routes:
 
@@ -154,6 +154,6 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\launch.ps1 -SmokeTest 
 
 These commands use the existing Python runtime on this computer. On another computer, use its Python 3.10+ interpreter with Tcl/Tk and SQLite. The smoke test opens a password-free local session, renders the four-drawer dashboard and loading form, then exits without contacting hardware. It needs a normal Windows desktop session. The sandbox used for code inspection cannot initialize Tcl/Tk on this machine; the normal Windows execution test passed.
 
-For firmware compilation, use the [official Arduino CLI](https://docs.arduino.cc/arduino-cli/installation), the board's actual platform, and Adafruit NeoPixel. Copy the sketch and `HardwareConfig.h` to a temporary `LockLights` folder for compilation. Never upload during an automated software test. `tests/test_firmware.py` also compiles and executes the actual sketch against simulated pins, serial and time when `g++` or a configured Visual Studio `cl` is on PATH. Those test profiles are synthetic and must not be uploaded.
+For firmware compilation, use the [official Arduino CLI](https://docs.arduino.cc/arduino-cli/installation), the board's actual platform, and Adafruit NeoPixel. Copy the sketch and `HardwareConfig.h` to a temporary `LockLights` folder for compilation. Never upload during an automated software test. `tests/test_firmware.py` also compiles and executes the actual MAS/1 and team sketches against simulated pins, sensors, serial and time when `g++` or a configured Visual Studio `cl` is on PATH. On this laptop the Visual Studio installs lack C++ headers, so run it in WSL Ubuntu, which has `g++`: `wsl python3 -B -m unittest tests.test_firmware`. Those test profiles are synthetic and must not be uploaded.
 
 See [software changes and validation](SOFTWARE_FIXES.md) for what was checked and what still depends on hardware requirements.

@@ -1,17 +1,24 @@
 """Real loading-screen controls using a temporary inventory and no hardware."""
 from pathlib import Path
 import tempfile
+import threading
 import tkinter as tk
+from tkinter import ttk
 import unittest
 import json
 import time
 from unittest.mock import patch
 
-from pharm.app import App, plural
-from pharm.catalog import Catalog
-from pharm.hardware import Simulator
+from pharm.app import PROGRESS_SECONDS, App, plural
+from pharm.catalog import Catalog, identifier
+from pharm.hardware import Result, Simulator
 from pharm.store import Store
+from pharm.widgets import Progress
 from test_inventory import PRODUCT
+
+# A 1x1 GIF, which Tk shows without an image library.
+GIF = (b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00"
+       b",\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;")
 
 
 class LoadingScreenTests(unittest.TestCase):
@@ -25,11 +32,30 @@ class LoadingScreenTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         directory = Path(self.temp.name)
+        self.download = patch("pharm.app.fetch_photo", side_effect=ValueError("No photo in tests.")).start()
+        self.addCleanup(patch.stopall)
         self.app = App(self.root, Store(directory / "inventory.sqlite3"),
                        Catalog(directory / "absent.json"), Simulator())
         self.addCleanup(self.app.executor.shutdown, wait=True)
         self.messages = patch("pharm.app.dialogs").start()
-        self.addCleanup(patch.stopall)
+
+    def widgets(self):
+        found, pending = [], [self.app.content]
+        while pending:
+            widget = pending.pop()
+            pending.extend(widget.winfo_children())
+            found.append(widget)
+        return found
+
+    def texts(self):
+        return [w.cget("text") for w in self.widgets() if isinstance(w, (tk.Label, ttk.Button))]
+
+    def pump_until(self, condition):
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and not condition():
+            self.root.update()
+            time.sleep(0.01)
+        self.assertTrue(condition())
 
     def form(self):
         self.app.loading(1)
@@ -174,6 +200,67 @@ class LoadingScreenTests(unittest.TestCase):
         entries["scan"].event_generate("<Return>")
         self.root.update()
         self.assertEqual("9999999999", entries["ndc"].get())
+
+
+    def test_progress_screen_covers_the_form_until_the_drawer_unlocks(self):
+        self.form()
+        release, results = threading.Event(), []
+        started = time.monotonic()
+        self.app.device(lambda: release.wait(5) and Result(True, "Opened."), results.append, "Unlocking drawer 1", "open")
+        self.root.update()
+        covers = [w for w in self.app.panel.winfo_children() if isinstance(w, Progress)]
+        self.assertEqual(1, len(covers))
+        self.assertIn("disabled", self.app.scan.state())
+        self.assertRegex(covers[0].left.get(), r"^About \d+ seconds? left$")
+        release.set()
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and not results:
+            self.root.update()
+            time.sleep(0.01)
+        self.assertTrue(results[0].ok)
+        self.assertGreaterEqual(time.monotonic() - started, PROGRESS_SECONDS)
+        self.assertFalse(any(isinstance(w, Progress) for w in self.app.panel.winfo_children()))
+        self.assertNotIn("disabled", self.app.scan.state())
+        self.assertIn("open", self.app.estimates)
+
+    def test_missing_label_photo_downloads_in_the_background_and_appears(self):
+        release = threading.Event()
+
+        def download(directory, code):
+            release.wait(5)
+            path = Path(directory) / (identifier(code) + ".gif")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(GIF)
+            return path
+        self.download.side_effect = download
+        self.load_existing()
+        self.app.home()
+        self.root.update()
+        self.assertIn("Downloading the label photo...", self.texts())
+        self.assertFalse(self.app.busy)  # dispensing and loading never wait on it
+        self.assertNotIn("disabled", self.app.scan.state())
+        release.set()
+        self.pump_until(lambda: any(isinstance(w, tk.Label) and w.cget("image") for w in self.widgets()))
+        self.assertNotIn("Downloading the label photo...", self.texts())
+        self.download.assert_called_once()
+
+    def test_failed_label_photo_is_not_retried_until_asked(self):
+        self.load_existing()
+        self.app.home()
+        self.pump_until(lambda: "No label photo available" in self.texts())
+        self.app.home()
+        self.root.update()
+        self.assertEqual(1, self.download.call_count)
+        retry = next(w for w in self.widgets() if isinstance(w, ttk.Button) and w.cget("text") == "Try again")
+        retry.invoke()
+        self.pump_until(lambda: self.download.call_count == 2 and "No label photo available" in self.texts())
+
+    def test_package_lookup_starts_its_label_photo_download(self):
+        entries, button = self.form()
+        entries["scan"].insert(0, PRODUCT["ndc"])
+        button.invoke()
+        self.pump_until(lambda: self.download.call_count == 1)
+        self.assertEqual(identifier(PRODUCT["ndc"]), identifier(self.download.call_args.args[1]))
 
 
 class PluralTests(unittest.TestCase):

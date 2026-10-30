@@ -55,6 +55,12 @@
       <input id="dialog-input" autocomplete="off" hidden>
       <div class="buttons"><button class="primary large" id="dialog-ok">Continue</button><button class="large" id="dialog-cancel">Cancel</button></div>
     </section>
+    <section class="progress hidden" id="progress" tabindex="-1" aria-labelledby="progress-title">
+      <p class="caption" id="progress-caption"></p>
+      <h2 id="progress-title"></h2>
+      <div class="bar" role="progressbar" aria-labelledby="progress-title" aria-valuemin="0" aria-valuemax="100"><span id="progress-fill"></span></div>
+      <p class="note" id="progress-left"></p>
+    </section>
     <p id="message" role="status" aria-live="polite"></p>
   </section>
 </main>
@@ -128,6 +134,47 @@ function ask(title, text, type=null, initial="", extra="", options={}) {
     if (type) { input.focus(); input.select(); } else $("dialog-ok").focus();
   });
 }
+// A cabinet step covers the work panel with a progress bar and the time left,
+// so the form beneath can be neither edited nor scanned into until it ends.
+// The estimate comes from how long earlier steps of the same kind took.
+const stepSeconds = 0.8, estimates = {};
+function timeLeft(seconds) { const s = Math.max(1, Math.ceil(seconds)); return `About ${s} second${s === 1 ? "" : "s"} left`; }
+async function step(title, kind, request) {
+  const expected = Math.max(stepSeconds, estimates[kind] ?? (state?.simulation ? 0 : 3));
+  const cover = $("progress"), bar = cover.querySelector(".bar"), focused = document.activeElement;
+  $("progress-caption").textContent = (context ? context + "  ·  " : "") + "Please wait";
+  $("progress-title").textContent = title;
+  for (const id of ["view", "load-view"]) $(id).inert = true;
+  $("panel").scrollTop = 0; $("panel").classList.add("stepping");
+  cover.classList.remove("hidden"); cover.focus();
+  const started = performance.now();
+  let took = null, shown = 0;
+  const paint = () => {
+    const elapsed = (performance.now() - started) / 1000;
+    let fraction = 0.9 + 0.09 * (1 - Math.exp((expected - elapsed) / expected)), text = "Taking longer than usual. Please wait.";
+    if (took !== null) [fraction, text] = [elapsed / stepSeconds, timeLeft(stepSeconds - elapsed)];  // answered early: catch up
+    else if (elapsed < expected) [fraction, text] = [0.9 * elapsed / expected, timeLeft(expected - elapsed)];
+    shown = Math.min(1, Math.max(shown, fraction));
+    $("progress-fill").style.width = `${shown * 100}%`;
+    bar.setAttribute("aria-valuenow", Math.round(shown * 100));
+    $("progress-left").textContent = text;
+  };
+  paint();
+  const timer = setInterval(paint, 50);
+  try {
+    const result = await request();
+    took = (performance.now() - started) / 1000;
+    estimates[kind] = kind in estimates ? (estimates[kind] + took) / 2 : took;
+    await new Promise(resolve => setTimeout(resolve, Math.max(0, stepSeconds - took) * 1000));
+    return result;
+  } finally {
+    clearInterval(timer);
+    cover.classList.add("hidden"); $("progress-fill").style.width = "0";
+    $("panel").classList.remove("stepping");
+    for (const id of ["view", "load-view"]) $(id).inert = false;
+    if (focused?.isConnected && !focused.disabled) focused.focus();
+  }
+}
 function paintBusy() {
   const active = !!state?.active;
   for(const id of ["manual-button","catalog-button"]) $(id).disabled = working || active;
@@ -156,14 +203,15 @@ function drawerView() {
       ${recorded.generic_name?`<p class="note">Recorded: ${esc(recorded.generic_name)} · lot ${esc(recorded.lot)}</p>`:""}
       <div class="actions"><div class="row"><button class="warning large" data-action="reconcile">Count drawer ${d.id}</button></div></div>`;
   }
-  if (!d.quantity) return `<p class="caption">Drawer ${d.id}</p><h2 class="empty">Empty</h2><p class="note">Nothing is in this drawer. Load it before dispensing.</p>${blocked}
+  if (!d.quantity) return `<p class="caption">Drawer ${d.id}</p><h2 class="empty">Empty</h2><p class="note lead">Nothing is in this drawer. Load it before dispensing.</p>${blocked}
       <div class="actions"><div class="row"><button class="primary large" disabled>Dispense</button><button class="large" data-action="load">Load drawer ${d.id}</button></div></div>`;
   const lots = [...new Set(d.items.map(i=>i.product.lot))];
   const [note, urgent] = expiryNote(p.expiry_date);
   const maker = [p.brand_name, p.labeler_name].filter(Boolean).join(" · ");
   const photo = d.photo
     ? `<button class="photo" data-action="photo" aria-label="Enlarge the package label photo"><img src="${esc(d.photo)}" alt="Package label for ${esc(p.generic_name)}"></button>`
-    : `<p class="photo-empty">No label photo saved <button class="link" data-action="photo">Download photo</button></p>`;
+    : d.photo_status === "loading" ? `<p class="photo-empty">Downloading the label photo...</p>`
+    : `<p class="photo-empty">No label photo available <button class="link" data-action="photo">Try again</button></p>`;
   return `<p class="caption">Drawer ${d.id}</p><h2>${esc(p.generic_name)}</h2>${maker?`<p class="maker">${esc(maker)}</p>`:""}
     <div class="facts"><div class="count"><b>${d.quantity}</b><span>${esc(plural(p.unit, d.quantity))} in drawer</span></div>
       <div class="${urgent?"urgent":""}"><b>${esc(p.expiry_date)}</b><span>${urgent?esc(note.toLowerCase()):"expires"}</span></div>
@@ -187,7 +235,7 @@ async function refresh() {
   const ownLoad = active && operation?.id === active.id && active.kind === "load" && active.state === "access";
   if (active && !ownLoad && view === "drawer") selected = active.compartment;
   $("load-done").hidden = !ownLoad;
-  if(ownLoad) { operation=active; $("load-box").textContent="Add this scanned box"; $("lookup-notice").textContent=`${active.requested} boxes staged. Inventory will be saved after placement and closure confirmations.`; }
+  if(ownLoad) { operation=active; $("load-box").textContent="Add this scanned box"; $("lookup-notice").textContent=`${active.requested} boxes staged. Close the drawer and choose Finish loading to save them.`; }
   render();
 }
 function select(number) {
@@ -227,19 +275,17 @@ async function loadBox() {
   if(operation) {
     operation=(await api("/api/add",{operation:operation.id,product,scan})).operation;
   } else {
-    operation=(await api("/api/start",{kind:"load",drawer:loadDrawer,count:1,product,scan})).operation;
+    operation=(await step(`Unlocking drawer ${loadDrawer}`,"open",()=>api("/api/start",{kind:"load",drawer:loadDrawer,count:1,product,scan}))).operation;
   }
   $("message").textContent="Place this box in the drawer. Scan the next box, or choose Finish loading.";
   $("load-scan").value=""; prepared=null; $("load-scan").focus();
 }
 async function cancelOperation(id, reason) {
-  await api("/api/cancel",{operation:id,reason}); operation=null; view="drawer";
+  await step("Locking the drawers","lock",()=>api("/api/cancel",{operation:id,reason})); operation=null; view="drawer";
   $("message").textContent="Inventory is not finalized. Count the drawer before continuing.";
 }
 async function complete(op) {
-  if(!await ask("Confirm physical contents",op.kind==="load"?`Have all ${op.requested} staged boxes been placed in drawer ${op.compartment}?`:op.kind==="unload"?"Have all contents been removed and the drawer checked empty?":`Have exactly ${op.requested} verified boxes been removed?`,null,"","",{ok:"Yes",cancel:"No"})) return cancelOperation(op.id,"Physical count not confirmed");
-  if(!await ask("Confirm closure","Close the selected drawer. Have you confirmed it is closed?",null,"","",{ok:"Yes"})) return cancelOperation(op.id,"Closure not confirmed");
-  const result=await api("/api/finish",{operation:op.id,placed:true,closed:true});
+  const result=await step("Saving inventory and locking the drawers","lock",()=>api("/api/finish",{operation:op.id,placed:true,closed:true}));
   operation=null; view="drawer"; $("message").textContent="Inventory saved."+(result.lock_ok?"":" Lock request failed: "+result.lock_message);
 }
 async function dispense(number) {
@@ -248,11 +294,11 @@ async function dispense(number) {
   const text=await ask("Dispense",`How many ${plural(drawer.product.unit, 2)} of ${drawer.product.generic_name}? ${drawer.quantity} in the drawer.`,"number","1");
   if(text===null) return;
   const count=Number(text); if(!Number.isInteger(count)||count<1) throw new Error("Enter a positive whole number.");
-  let op=(await api("/api/start",{kind:"dispense",drawer:number,count})).operation;
+  let op=(await step(`Unlocking drawer ${number}`,"open",()=>api("/api/start",{kind:"dispense",drawer:number,count}))).operation;
   for(let index=0;index<count;index++) {
     const scan=await ask("Verify each box",`Scan box ${index+1} of ${count} as you remove it. If access has timed out, submit an empty scan to request reopening.`,"text","","",{ok:"Submit scan"});
     if(scan===null) return cancelOperation(op.id,"Cancelled after drawer access");
-    if(scan.trim()==="") { if(await ask("Request drawer access again","Request one new access command for the same drawer?",null,"","",{ok:"Yes"})) await api("/api/reopen",{operation:op.id}); index--; continue; }
+    if(scan.trim()==="") { await step(`Unlocking drawer ${number}`,"open",()=>api("/api/reopen",{operation:op.id})); index--; continue; }
     op=(await api("/api/verify",{operation:op.id,scan})).operation;
   }
   await complete(op);
@@ -260,7 +306,9 @@ async function dispense(number) {
 async function unload(number) {
   context = `Drawer ${number}`;
   if(!await ask("Unload drawer",`Remove all stock from drawer ${number}?`,null,"","",{ok:"Unload drawer",danger:true,tone:"warn"})) return;
-  const op=(await api("/api/start",{kind:"unload",drawer:number})).operation;
+  const op=(await step(`Unlocking drawer ${number}`,"open",()=>api("/api/start",{kind:"unload",drawer:number}))).operation;
+  // Nothing senses when the drawer is empty and closed; locking sooner would end the release.
+  if(!await ask(`Drawer ${number} is open`,"Remove everything, close the drawer, then choose Done.",null,"","",{ok:"Done"})) return cancelOperation(op.id,`Cancelled while drawer ${number} was open`);
   await complete(op);
 }
 function showRecords(number) {
@@ -273,7 +321,6 @@ async function packagePhoto(number) {
   context = `Drawer ${number}`;
   const drawer=state.drawers[number-1];
   if(drawer.photo) { await ask("Package photo",drawer.product.generic_name,null,"",`<img src="${esc(drawer.photo)}" alt="Package photo">`,{ok:"Close",noCancel:true}); return; }
-  if(!await ask("Package photo","No photo is saved for this package. Download one from DailyMed?",null,"","",{ok:"Download"})) return;
   $("message").textContent=(await api(`/api/photo/${number}`,{})).message;
 }
 async function manual() {
@@ -281,7 +328,7 @@ async function manual() {
   const text=await ask("Unlock a drawer","Which drawer? (1 to 4)","number","1"); if(text===null) return;
   context = `Drawer ${text}`;
   const reason=await ask("Unlock a drawer","Why does it need to be opened?","text"); if(reason===null) return;
-  const op=(await api("/api/start",{kind:"manual",drawer:Number(text),reason})).operation;
+  const op=(await step(`Unlocking drawer ${text}`,"open",()=>api("/api/start",{kind:"manual",drawer:Number(text),reason}))).operation;
   await ask("Drawer open",`Drawer ${op.compartment} is open. When you're done, count what is in it.`,null,"","",{ok:"Done",noCancel:true});
   await cancelOperation(op.id,"Manual inspection requires a physical count");
 }
@@ -301,9 +348,8 @@ async function reconcile() {
     count=Number(text); if(!Number.isInteger(count)||count<0) throw new Error("Enter a nonnegative whole number.");
   }
   const reason=await ask("Count drawer","What happened? This is recorded in the audit log. (Optional)","text"); if(reason===null) return;
-  if(!await ask("Confirm closure","Have you verified the contents and closed all four drawers?",null,"","",{ok:"Yes"})) return;
   const data={operation:op.id,count,reason,closed:true}; if(ids) data.remaining_ids=ids;
-  const result=await api("/api/reconcile",data); operation=null; view="drawer"; $("message").textContent="Count saved."+(result.lock_ok?"":" Lock request failed: "+result.lock_message);
+  const result=await step("Saving the count and locking the drawers","lock",()=>api("/api/reconcile",data)); operation=null; view="drawer"; $("message").textContent="Count saved."+(result.lock_ok?"":" Lock request failed: "+result.lock_message);
 }
 document.addEventListener("click", event => {
   for (const menu of document.querySelectorAll("details.menu[open]")) if (!menu.contains(event.target)) menu.removeAttribute("open");
@@ -332,7 +378,7 @@ $("load-box").onclick=()=>run(loadBox);
 $("load-done").onclick=()=>run(()=>complete(operation));
 $("load-cancel").onclick=()=>run(async()=>{if(operation) await cancelOperation(operation.id,"Loading cancelled after access"); view="drawer";});
 $("rx").onkeydown=event=>{if(event.key==="Enter") {event.preventDefault();run(async()=>{const match=await api("/api/find",{scan:$("rx").value});$("rx").value="";let number=match.drawers[0];if(match.drawers.length>1){context="";const text=await ask("Choose a drawer",`This package is in drawers ${match.drawers.join(", ")}. Which one?`,"number",String(number));if(text===null)return;number=Number(text);if(!match.drawers.includes(number))throw new Error("Choose a matching drawer.");}selected=number;view="drawer";render();await dispense(number);});}};
-$("status-button").onclick=()=>run(async()=>{ $("message").textContent=(await api("/api/status")).message; });
+$("status-button").onclick=()=>run(async()=>{ context=""; $("message").textContent=(await step("Checking the cabinet","status",()=>api("/api/status"))).message; });
 $("catalog-button").onclick=()=>$("catalog-file").click();
 $("catalog-file").onchange=()=>run(async()=>{
   if(!$("catalog-file").files[0]) return;

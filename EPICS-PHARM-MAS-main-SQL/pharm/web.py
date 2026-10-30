@@ -83,6 +83,19 @@ def create_app(store, catalog, hardware):
         page = (ROOT / "UI/web/index.html").read_text(encoding="utf-8")
         return page.replace("__PHARM_TOKEN__", token)
 
+    def label_photo(product):
+        """The saved label photo's URL and download status. A package without one
+        starts downloading in the background, once until asked to try again."""
+        key = identifier(product["ndc"])
+        job = photo_jobs.get(key)
+        settled = job is not None and job.done()  # read before the cache: the download may land in between
+        photo = cached(image_dir, key) or cached(ROOT / "UI/images", key)
+        if photo:
+            return f"/images/{photo.name}", None
+        if job is None:
+            photo_jobs[key] = photos.submit(fetch_photo, image_dir, product["ndc"])
+        return None, "failed" if settled else "loading"
+
     @app.get("/api/state")
     def state():
         result = []
@@ -90,17 +103,14 @@ def create_app(store, catalog, hardware):
         for drawer in store.compartments():
             product = drawer["product"]
             expiry = product.get("expiry_date")
-            photo = cached(image_dir, product["ndc"]) if product else None
-            if not photo and product:
-                photo = cached(ROOT / "UI/images", product["ndc"])
+            photo, photo_status = label_photo(product) if product else (None, None)
             result.append({**drawer, "expiring": bool(expiry and date.fromisoformat(expiry) <= today + timedelta(days=31)),
-                           "photo": f"/images/{photo.name}" if photo else None})
+                           "photo": photo, "photo_status": photo_status})
         active = store.active()
         choices = store.reconciliation_items(active["id"]) if active else []
         return jsonify(ok=True, drawers=result, active=active, choices=choices, mode=hardware.mode,
                        open_mode=getattr(hardware, "open_drawers", [hardware.selected] if getattr(hardware, "selected", None) else []),
-                       simulation=isinstance(hardware, Simulator), catalog=service.catalog.warning,
-                       photo_jobs={k: "complete" if f.done() and not f.exception() else "failed" if f.done() else "loading" for k, f in photo_jobs.items()})
+                       simulation=isinstance(hardware, Simulator), catalog=service.catalog.warning)
 
     @app.get("/api/status")
     def status():

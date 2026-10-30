@@ -2,8 +2,7 @@
 
 When the application registers a prompt host (the desktop's work panel), each
 prompt appears there as one guided step instead of a separate window, so a
-sequence such as count, scan, confirm removal and confirm closure happens in
-one place. Without a host, or while a step is already showing, prompts open as
+sequence such as count, scan and done happens in one place. Without a host, or while a step is already showing, prompts open as
 themed modal windows. Either way each call blocks until it is answered, and a
 barcode scan ending in Enter submits like typing.
 """
@@ -135,13 +134,14 @@ def askyesno(title, message, parent=None, yes="Yes", no="No", danger=False):
     return bool(prompt.show(accept))
 
 
-def _ask(title, text, parent, initialvalue, convert, scan=False, confirm="Continue"):
+def _ask(title, text, parent, initialvalue, convert, scan=False, confirm="Continue", error=""):
     prompt = _Prompt(parent, title, text)
     entry = prompt.add(ttk.Entry(prompt.body, font=prompt.theme.font("scan" if scan else "input")))
     if initialvalue is not None:
         entry.insert(0, str(initialvalue))
         entry.select_range(0, "end")
     prompt.error_slot()
+    prompt.error.set(error)
 
     def submit(_event=None):
         try:
@@ -173,10 +173,11 @@ def askinteger(title, prompt, parent=None, minvalue=None, maxvalue=None, initial
     return _ask(title, prompt, parent, initialvalue, convert)
 
 
-def askstring(title, prompt, parent=None, initialvalue=None, scan=False):
-    """Returns the text, possibly empty, or None when cancelled."""
+def askstring(title, prompt, parent=None, initialvalue=None, scan=False, error=""):
+    """Returns the text, possibly empty, or None when cancelled. `error` says
+    why a previous answer was rejected."""
     return _ask(title, prompt, parent, initialvalue, lambda text: text, scan=scan,
-                confirm="Submit scan" if scan else "Continue")
+                confirm="Submit scan" if scan else "Continue", error=error)
 
 
 def askchoices(title, prompt, options, parent=None):

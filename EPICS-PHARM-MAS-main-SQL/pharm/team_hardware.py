@@ -4,7 +4,12 @@ It never opens a port at import, guesses a protocol, or retries an actuator.
 Status reports output levels and open mode, not measured physical closure.
 """
 import threading
+import time
 from .hardware import Result, compartment, open_usb_port
+
+# Every team reply is one byte. Bytes still arriving this soon after it are
+# the rest of a text reply, such as MAS/1 firmware sends.
+TRAILING_REPLY_WAIT = 0.05
 
 
 class TeamSerialHardware:
@@ -34,16 +39,21 @@ class TeamSerialHardware:
             raise OSError("Serial port is closed.")
         self._write(0x30)
         # Team firmware returns exactly one status byte. MAS/1 returns text.
-        response = self.uart.read(2)
+        # Asking for a second byte would wait out the whole read timeout, so
+        # take the first as soon as it arrives and then check for any more.
+        response = self.uart.read(1)
         if len(response) != 1:
             raise OSError("No team status reply. Select the matching firmware profile.")
+        time.sleep(TRAILING_REPLY_WAIT)
+        if self.uart.in_waiting:
+            raise OSError("Unexpected multi-byte status reply. Select the matching firmware profile.")
         mask = response[0]
         self.open_drawers = [n + 1 for n in range(4) if mask & (1 << n)]
         self.output_unlocked = [n + 1 for n in range(4) if mask & (1 << (n + 4))]
 
     def _echo(self, command):
         self._write(command)
-        if self.uart.read(2) != bytes([command]):
+        if self.uart.read(1) != bytes([command]):
             raise OSError("The cabinet did not acknowledge the command. Do not retry uncertain access.")
 
     def _run(self, action=None):

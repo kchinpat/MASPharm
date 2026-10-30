@@ -35,22 +35,34 @@ class FirmwareTests(unittest.TestCase):
             if invalid:
                 profile = profile.replace(*invalid)
             (directory / "HardwareConfig.h").write_text(profile)
-            executable = directory / "behavior.exe"
-            harness = ROOT / "tests/firmware"
-            if Path(COMPILER).name.lower() == "cl.exe":
-                args = [COMPILER, "/nologo", "/EHsc", "/std:c++14", f"/I{directory}",
-                        f"/I{harness}", str(harness / "behavior.cpp"), f"/Fe:{executable}"]
-            else:
-                args = [COMPILER, "-std=c++11", f"-I{directory}", f"-I{harness}",
-                        str(harness / "behavior.cpp"), "-o", str(executable)]
-            result = subprocess.run(args, cwd=directory, capture_output=True, text=True, timeout=60)
+            result = self.compile(directory, "behavior.cpp")
             if invalid:
                 self.assertNotEqual(0, result.returncode, "Invalid profile unexpectedly compiled")
                 self.assertIn("Configure and verify", result.stdout + result.stderr)
             else:
-                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-                result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=10)
-                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                self.run_behavior(directory, result)
+
+    def compile(self, directory, source):
+        executable = directory / "behavior.exe"
+        harness = ROOT / "tests/firmware"
+        if Path(COMPILER).name.lower() == "cl.exe":
+            args = [COMPILER, "/nologo", "/EHsc", "/std:c++14", f"/I{directory}",
+                    f"/I{harness}", str(harness / source), f"/Fe:{executable}"]
+        else:
+            args = [COMPILER, "-std=c++11", f"-I{directory}", f"-I{harness}",
+                    str(harness / source), "-o", str(executable)]
+        return subprocess.run(args, cwd=directory, capture_output=True, text=True, timeout=60)
+
+    def run_behavior(self, directory, compiled):
+        self.assertEqual(0, compiled.returncode, compiled.stdout + compiled.stderr)
+        result = subprocess.run([str(directory / "behavior.exe")], capture_output=True, text=True, timeout=10)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_team_drawer_stays_unlocked_until_pulled_out_and_closed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder)
+            shutil.copy(ROOT / "arduino/LockLights/LockLights.ino", directory)
+            self.run_behavior(directory, self.compile(directory, "team_behavior.cpp"))
 
     def test_disabled_firmware_never_drives_outputs(self):
         self.build()

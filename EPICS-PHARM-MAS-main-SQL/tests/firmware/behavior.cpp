@@ -3,6 +3,7 @@
 unsigned long fakeNow = 0;
 unsigned long clockStep = 0;
 int pins[20] = {};
+int analogValues[20] = {};
 int writes = 0;
 FakeSerial Serial;
 #include "LockLights.ino"

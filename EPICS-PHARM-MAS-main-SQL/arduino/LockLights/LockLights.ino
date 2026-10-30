@@ -16,13 +16,17 @@ const int lock4 = 7;
 const int lockPins[4] = { lock1, lock2, lock3, lock4 };
 const int fsrPins[4] = { FSR1_pin, FSR2_pin, FSR3_pin, FSR4_pin };
 
-// Locks are HIGH = locked, LOW = unlocked. Keep the solenoids energized only briefly to avoid over-heating.
-const unsigned long UNLOCK_PULSE_MS = 500;   // how long a drawer unlocks when it's opened
-const unsigned long SENSOR_HOLD_MS = 2000;   // how long to stay unlocked each time the sensor reads the drawer as out
+// Locks are HIGH = locked, LOW = unlocked. A released drawer stays unlocked until it has been
+// pulled out and pushed closed again, or for OPEN_WAIT_MS if nobody pulls it out. The solenoid
+// is powered that whole time, so keep these within the lock's rated on-time to avoid over-heating.
+const unsigned long OPEN_WAIT_MS = 10000;    // how long a released drawer waits to be pulled out
+const unsigned long OUT_CONFIRM_MS = 200;    // how long the sensor must read the drawer as out before it counts
+const unsigned long SENSOR_HOLD_MS = 2000;   // how long to stay unlocked after the sensor last read the drawer as out
 const int SENSOR_THRESHOLD = 600;            // pressure sensor readings below this mean the drawer is out
 
 // Commands from the app (each one is echoed back when done):
 //   1-4          open mode for that drawer: unlock it, light it green, and watch its sensor.
+//                It stays unlocked until it has been pulled out and closed (see above).
 //                Other open drawers stay open.
 //   7            end open mode for every drawer: lock all and turn all LEDs off.
 //   0x20-0x2F    set open mode to exactly the drawers in the low 4 bits (bit 0 = drawer 1).
@@ -38,6 +42,9 @@ int firstPixels[5] = { 0, 23, 46, 69, 91 };   // Contains the first pixel number
 
 uint8_t openMask = 0;                    // drawers in open mode (bit 0 = drawer 1)
 unsigned long unlockUntil[4] = { 0, 0, 0, 0 };  // millis() until which each lock stays unlocked
+bool readingOut[4] = { false, false, false, false };  // the sensor currently reads the drawer as out
+unsigned long outSince[4] = { 0, 0, 0, 0 };          // millis() when that reading started
+bool pulledOut[4] = { false, false, false, false };   // the drawer has been out since it was released
 
 void initPins() {
   for (int d = 0; d < 4; d++) {
@@ -76,6 +83,29 @@ void holdUnlocked(int d, unsigned long ms) {
   }
 }
 
+// While the drawer is out it stays unlocked; it locks SENSOR_HOLD_MS after it is closed.
+// A reading counts only once it has lasted OUT_CONFIRM_MS, so a noisy sensor on a
+// closed drawer can't cut the wait short.
+void watchSensor(int d) {
+  unsigned long now = millis();
+  if (analogRead(fsrPins[d]) >= SENSOR_THRESHOLD) {
+    readingOut[d] = false;
+    return;
+  }
+  if (!readingOut[d]) {
+    readingOut[d] = true;
+    outSince[d] = now;
+  }
+  if (now - outSince[d] < OUT_CONFIRM_MS) {
+    return;
+  }
+  if (!pulledOut[d]) {
+    pulledOut[d] = true;
+    unlockUntil[d] = now;  // it's open, so stop waiting for it to be pulled out
+  }
+  holdUnlocked(d, SENSOR_HOLD_MS);
+}
+
 // A lock is unlocked only while its drawer is in open mode and its unlock time hasn't run out.
 void updateLocks() {
   unsigned long now = millis();
@@ -104,7 +134,9 @@ void handleCommand(int8_t command) {
   if (command >= 1 && command <= 4) {
     int d = command - 1;
     openMask |= (1 << d);
-    holdUnlocked(d, UNLOCK_PULSE_MS);
+    readingOut[d] = false;
+    pulledOut[d] = false;
+    holdUnlocked(d, OPEN_WAIT_MS);
   }
   else if (command == 7) {
     openMask = 0;
@@ -140,8 +172,10 @@ void loop() {
 
   // Every open drawer keeps watching its own sensor: while the drawer reads as out, keep it unlocked.
   for (int d = 0; d < 4; d++) {
-    if ((openMask & (1 << d)) && analogRead(fsrPins[d]) < SENSOR_THRESHOLD) {
-      holdUnlocked(d, SENSOR_HOLD_MS);
+    if (openMask & (1 << d)) {
+      watchSensor(d);
+    } else {
+      readingOut[d] = false;
     }
   }
   updateLocks();

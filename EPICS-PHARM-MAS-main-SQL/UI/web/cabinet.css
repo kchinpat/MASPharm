@@ -102,6 +102,7 @@ input.scan { font-family: var(--mono); font-size: 18px; }
 .view h2 { font-size: 32px; font-weight: 600; line-height: 1.25; margin-top: 8px; }
 .view h2.empty { color: var(--faint); }
 .maker, .note { color: var(--muted); margin-top: 6px; max-width: 640px; }
+.note.lead { font-size: 22px; font-weight: 600; line-height: 1.35; margin-top: 12px; }
 .facts { display: flex; flex-wrap: wrap; gap: 24px 0; margin-top: 32px; }
 .facts > div { padding: 0 28px; border-left: 1px solid var(--border); }
 .facts > div:first-child { padding-left: 0; border-left: 0; }
@@ -143,6 +144,15 @@ input.scan { font-family: var(--mono); font-size: 18px; }
 .box-list > :last-child { border-bottom: 0; }
 .box-list input { width: 22px; min-height: 0; margin: 0; accent-color: var(--accent); }
 
+/* Cabinet step in progress: covers the panel, above any guided step, until it ends */
+.panel.stepping { overflow: hidden; }
+.progress { position: absolute; inset: 0; z-index: 6; padding: 40px 44px; background: var(--surface); }
+.progress:focus { outline: none; }
+.progress h2 { font-size: 32px; font-weight: 600; line-height: 1.25; margin-top: 8px; max-width: 680px; }
+.progress .bar { max-width: 600px; height: 10px; margin-top: 28px; border-radius: 5px; background: var(--border); overflow: hidden; }
+.progress .bar span { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--accent); transition: width .1s linear; }
+.progress .note { margin-top: 10px; }
+
 /* Brief result line along the bottom of the panel */
 #message { position: sticky; bottom: 0; z-index: 4; margin-top: auto; padding: 12px 44px; background: var(--accent-soft); color: var(--accent-dark); font-weight: 600; white-space: pre-line; }
 #message:not(.show) { display: none; }
@@ -159,7 +169,7 @@ input.scan { font-family: var(--mono); font-size: 18px; }
   .front .num { font-size: 26px; }
   .front .name { font-size: 15px; }
   .panel { overflow: visible; min-height: 70vh; }
-  .view, .prompt { padding: 28px 20px; }
+  .view, .prompt, .progress { padding: 28px 20px; }
   .fields { grid-template-columns: 1fr; }
   .fields label.wide, .more-fields { grid-column: auto; }
 }

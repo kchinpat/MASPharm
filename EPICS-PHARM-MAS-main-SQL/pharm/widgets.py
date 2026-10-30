@@ -131,6 +131,51 @@ def _wheel(event):
         widget.scroll(steps)
 
 
+class Progress(tk.Frame):
+    """Covers a panel while the cabinet works, so the form beneath can be
+    neither edited nor scanned into. Shows the step, a bar and the time left."""
+
+    def __init__(self, parent, title, context=""):
+        super().__init__(parent, bg=T.SURFACE)
+        theme = T.apply_theme(parent)
+        px = theme.px
+        self.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self.lift()
+        body = tk.Frame(self, bg=T.SURFACE, padx=px(44), pady=px(40))
+        body.pack(fill="x")
+        caption = f"{context}  ·  Please wait" if context else "Please wait"
+        label(body, caption.upper(), "caption", T.ACCENT_DARK).pack(anchor="w")
+        label(body, title, "display", wraplength=px(600)).pack(anchor="w", pady=(px(8), 0))
+        self.thickness, self.longest = px(10), px(600)
+        self.bar = tk.Canvas(body, height=self.thickness, bg=T.SURFACE, highlightthickness=0, bd=0)
+        self.bar.pack(fill="x", pady=(px(28), 0))
+        self.track, self.fill = (self.bar.create_line(0, 0, 0, 0, fill=color, width=self.thickness, capstyle="round")
+                                 for color in (T.BORDER, T.ACCENT))
+        self.left = tk.StringVar()
+        label(body, font="body", fg=T.MUTED, textvariable=self.left).pack(anchor="w", pady=(px(10), 0))
+        self.fraction = 0.0
+        self.bar.bind("<Configure>", lambda _: self.draw())
+        # Keyboard focus stays here: Tab would otherwise reach the covered fields.
+        for key in ("<Tab>", "<Shift-Tab>"):
+            self.bind(key, lambda _: "break")
+        self.focus_set()
+
+    def show(self, fraction, text):
+        """The bar never moves backwards."""
+        self.fraction = max(self.fraction, min(fraction, 1.0))
+        self.left.set(text)
+        self.draw()
+
+    def draw(self):
+        radius = self.thickness / 2
+        length = min(self.bar.winfo_width(), self.longest) - self.thickness
+        if length <= 0:
+            return
+        self.bar.coords(self.track, radius, radius, radius + length, radius)
+        self.bar.coords(self.fill, radius, radius, radius + length * self.fraction, radius)
+        self.bar.itemconfigure(self.fill, state="normal" if self.fraction > 0 else "hidden")
+
+
 class Splash(tk.Frame):
     """Shown while the package catalog loads, so launch never looks frozen."""
 

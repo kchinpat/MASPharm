@@ -4,12 +4,13 @@ import json
 from pathlib import Path
 import sqlite3
 import tempfile
+import threading
 import unittest
 from unittest.mock import Mock, patch
 from datetime import date, timedelta
 
 from pharm.barcodes import read_scan, expiry_date, drug_ndc
-from pharm.catalog import Catalog
+from pharm.catalog import Catalog, identifier
 from pharm.hardware import Simulator, Result
 from pharm.store import Store
 from pharm.team_hardware import TeamSerialHardware
@@ -278,11 +279,46 @@ class BrowserTests(CombinedFixture):
         self.app = create_app(self.store, self.catalog, self.hardware)
         self.client = self.app.test_client()
         self.addCleanup(self.app.extensions["photos"].shutdown, wait=True)
+        self.download = patch("pharm.web.fetch_photo", side_effect=ValueError("No photo in tests.")).start()
+        self.addCleanup(patch.stopall)
         page = self.client.get("/").get_data(as_text=True)
         self.token = page.split('const token = "', 1)[1].split('"', 1)[0]
 
     def post(self, path, data):
         return self.client.post(path, json=data, headers={"X-Pharm-Token": self.token})
+
+    def photo_downloads_finish(self):
+        self.app.extensions["photos"].submit(lambda: None).result(timeout=5)  # queued behind them
+
+    def test_state_downloads_a_missing_label_photo_in_the_background(self):
+        release = threading.Event()
+
+        def download(directory, code):
+            release.wait(5)
+            path = Path(directory) / (identifier(code) + ".gif")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"GIF89a")
+            return path
+        self.download.side_effect = download
+        self.complete(self.start_box())
+        drawer = self.client.get("/api/state").json["drawers"][0]
+        self.assertEqual((None, "loading"), (drawer["photo"], drawer["photo_status"]))
+        self.assertIsNone(self.client.get("/api/state").json["drawers"][1]["photo_status"])
+        release.set()
+        self.photo_downloads_finish()
+        drawer = self.client.get("/api/state").json["drawers"][0]
+        self.assertEqual(("/images/0123456789.gif", None), (drawer["photo"], drawer["photo_status"]))
+        self.download.assert_called_once()
+
+    def test_failed_label_photo_is_not_retried_until_asked(self):
+        self.complete(self.start_box())
+        self.client.get("/api/state")
+        self.photo_downloads_finish()
+        self.assertEqual("failed", self.client.get("/api/state").json["drawers"][0]["photo_status"])
+        self.assertEqual(1, self.download.call_count)
+        self.assertEqual(200, self.post("/api/photo/1", {}).status_code)
+        self.photo_downloads_finish()
+        self.assertEqual(2, self.download.call_count)
 
     def test_browser_load_does_not_commit_before_closure_then_desktop_sees_boxes(self):
         response = self.post("/api/start", {"kind":"load", "drawer":1, "count":1, "product":PRODUCT, "scan":barcode()})
@@ -345,12 +381,45 @@ class BrowserTests(CombinedFixture):
         self.assertEqual(409, self.post("/api/finish", {"operation":op["id"],"placed":True,"closed":True,"secured":True}).status_code)
 
 
+class FakeUart:
+    """Answers each written command with its queued reply. Reading more bytes
+    than have arrived stands for waiting out the serial read timeout."""
+
+    def __init__(self, replies):
+        self.is_open = True
+        self.replies = list(replies)
+        self.pending = b""
+        self.writes = []
+        self.timeouts = 0
+
+    def reset_input_buffer(self):
+        self.pending = b""
+
+    def write(self, data):
+        self.writes.append(bytes(data))
+        self.pending += self.replies.pop(0) if self.replies else b""
+        return len(data)
+
+    def flush(self):
+        pass
+
+    @property
+    def in_waiting(self):
+        return len(self.pending)
+
+    def read(self, size=1):
+        if size > len(self.pending):
+            self.timeouts += 1
+        data, self.pending = self.pending[:size], self.pending[size:]
+        return data
+
+    def close(self):
+        self.is_open = False
+
+
 class TeamAdapterTests(unittest.TestCase):
     def uart(self, replies):
-        uart = Mock(is_open=True)
-        uart.write.return_value = 1
-        uart.read.side_effect = replies
-        return uart
+        return FakeUart(replies)
 
     def test_adapter_is_lazy_and_requires_status_before_actuating(self):
         uart = self.uart([b"\x00",b"\x20",b"\x01"])
@@ -358,21 +427,31 @@ class TeamAdapterTests(unittest.TestCase):
         adapter = TeamSerialHardware("COM9", factory)
         factory.assert_not_called()
         self.assertTrue(adapter.open(1).ok)
-        self.assertEqual([b"\x30",b"\x20",b"\x01"], [c.args[0] for c in uart.write.call_args_list])
+        self.assertEqual([b"\x30",b"\x20",b"\x01"], uart.writes)
+
+    def test_replies_are_taken_without_waiting_out_the_read_timeout(self):
+        # Each reply is one byte; asking for more stalled every command by the
+        # full timeout, so the drawer's release ended before the screen said open.
+        uart = self.uart([b"\x00",b"\x20",b"\x01",b"\x01",b"\x07",b"\x00"])
+        adapter = TeamSerialHardware("COM9", lambda:uart)
+        self.assertTrue(adapter.open(1).ok)
+        self.assertTrue(adapter.lock().ok)
+        self.assertTrue(adapter.status().ok)
+        self.assertEqual(0, uart.timeouts)
 
     def test_mas1_text_is_rejected_before_any_actuator_command(self):
-        uart = self.uart([b"MA"])
+        uart = self.uart([b"MAS/1 ERR UNKNOWN\r\n"])
         result = TeamSerialHardware("COM9", lambda:uart).open(1)
         self.assertFalse(result.ok)
         self.assertFalse(result.action_attempted)
-        self.assertEqual([b"\x30"], [c.args[0] for c in uart.write.call_args_list])
+        self.assertEqual([b"\x30"], uart.writes)
 
     def test_lost_unlock_echo_is_never_retried(self):
         uart = self.uart([b"\x00",b"\x20",b""])
         result = TeamSerialHardware("COM9", lambda:uart).open(1)
         self.assertFalse(result.ok)
         self.assertTrue(result.action_attempted)
-        self.assertEqual(1, [c.args[0] for c in uart.write.call_args_list].count(b"\x01"))
+        self.assertEqual(1, uart.writes.count(b"\x01"))
 
     def test_status_exposes_output_levels_without_claiming_physical_closure(self):
         uart = self.uart([b"\x21"])

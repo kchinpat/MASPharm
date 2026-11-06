@@ -1,0 +1,1664 @@
+"""Dependency-free Tkinter UI. All hardware I/O runs outside the UI thread.
+
+The window mirrors the hardware: the four drawer fronts stacked on the left,
+and one work panel on the right. Selecting a drawer shows what is in it and
+what you can do; workflows then run there one guided step at a time.
+"""
+import argparse
+from concurrent.futures import Future, ThreadPoolExecutor
+import csv
+from datetime import date, datetime
+import json
+import logging
+import math
+import os
+from pathlib import Path
+import sys
+import threading
+import time
+import tkinter as tk
+from tkinter import filedialog, ttk
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))  # UI/theme.py lives beside this package
+
+from UI import theme as T  # noqa: E402
+from . import activity, dialogs  # noqa: E402
+from .activity import capitalized, plural  # noqa: E402
+from .catalog import Catalog  # noqa: E402
+from .hardware import HttpHardware, Result, Simulator, SerialHardware, usb_ports  # noqa: E402
+from .store import Store  # noqa: E402
+from .barcodes import read_scan  # noqa: E402
+from .catalog import identifier  # noqa: E402
+from .team_hardware import TeamSerialHardware  # noqa: E402
+from .photos import cached, fetch_photo  # noqa: E402
+from .widgets import Progress, ScrollFrame, Splash, divider, label, set_window_icon  # noqa: E402
+
+# key, label, columns spanned, optional (hidden under "More details")
+FIELDS = (
+    ("generic_name", "Medication", 2, False),
+    ("ndc", "Package ID", 1, False),
+    ("lot", "Lot", 1, False),
+    ("expiry_date", "Expiration date (YYYY-MM-DD)", 1, False),
+    ("unit", "Unit type (bottle, box, tablet)", 1, False),
+    ("description", "Package description", 2, True),
+    ("brand_name", "Brand", 1, True),
+    ("labeler_name", "Labeler", 1, True),
+)
+# UI two's load form, in three columns. Strength and serial are shown to check
+# against the label; they are not product fields, so they are never saved from it.
+CONSOLE_FIELDS = (
+    ("generic_name", "Medication"), ("strength", "Strength"), ("unit", "Unit type"),
+    ("ndc", "Package ID"), ("lot", "Lot"), ("expiry_date", "Expires (YYYY-MM-DD)"),
+    ("brand_name", "Brand"), ("labeler_name", "Labeler"), ("serial", "Serial"),
+    ("description", "Package description"),
+)
+
+# Cabinet steps show their progress for at least this long, so the bar can be
+# read even when the device answers at once.
+PROGRESS_SECONDS = 0.8
+# Expected seconds for a step until one has been timed. A new USB connection
+# waits 2 s for the board to reset before its handshake.
+HARDWARE_ESTIMATE = 3.0
+# How often a drawer showing a label photo still downloading checks for it.
+PHOTO_POLL_MS = 250
+
+
+def expiry_days(expiry):
+    return (date.fromisoformat(expiry) - date.today()).days
+
+
+def time_left(seconds):
+    seconds = max(1, math.ceil(seconds))
+    return f"About {seconds} second{'' if seconds == 1 else 's'} left"
+
+
+def expiry_note(expiry):
+    """Short expiration wording and whether it needs attention (31-day window)."""
+    days = expiry_days(expiry)
+    if days < 0:
+        return "Expired", True
+    if days == 0:
+        return "Expires today", True
+    if days <= 31:
+        return f"Expires in {days} day{'' if days == 1 else 's'}", True
+    return f"Expires {expiry}", False
+
+
+class App:
+    def __init__(self, root, store, catalog, hardware):
+        self.root, self.store, self.catalog, self.hardware = root, store, catalog, hardware
+        self.operator = None
+        self.role = None
+        self.busy = False
+        self.executor = ThreadPoolExecutor(max_workers=1)
+        self.estimates = {}  # step kind -> expected seconds
+        self.theme = T.apply_theme(root)
+        self.px = self.theme.px
+        self.photos = []
+        self.photo_jobs = {}  # package identifier -> its label photo download this session
+        self.photo_lock = threading.Lock()
+        self.load_form = None
+        self.view = None
+        self.selected = 1
+        self.prompt = None
+        self.context = ""
+        self.detail = False  # UI two: More is open on the selected drawer
+        root.title("Pharmacy Drawer")
+        if not getattr(root, "pharm_sized", False):
+            size_window(root)
+        self.size_limit()
+        root.bind("<Escape>", lambda _: root.attributes("-fullscreen", False))
+        root.bind("<F11>", lambda _: root.attributes("-fullscreen", not root.attributes("-fullscreen")))
+        root.protocol("WM_DELETE_WINDOW", self.close)
+        root.report_callback_exception = self.callback_error
+        self.status_text = tk.StringVar(value="Ready")
+        self.status_at = 0.0
+        self.status_job = None
+        self.expiry_notice = None
+        self.chrome()
+        root.pharm_prompt_host = self
+        self.status_text.trace_add("write", lambda *_: self.notify(fresh=True))
+        self.operator = self.store.start_local_session()
+        self.role = "admin"
+        self.home()
+
+    def callback_error(self, kind, value, traceback):
+        logging.error("UI callback failed", exc_info=(kind, value, traceback))
+        try:
+            active = self.store.active()
+        except Exception:
+            active = None
+        note = f"\nDrawer {active['compartment']} is unfinished. Open it to finish or count it." if active else ""
+        dialogs.showerror("Action failed", f"{value}{note}", parent=self.root)
+
+    # -- Shell ----------------------------------------------------------------
+
+    def size_limit(self):
+        """UI two's columns need more room than the two panes of the legacy UI."""
+        self.root.minsize(self.px(1120 if T.console() else 900), self.px(660 if T.console() else 600))
+
+    def chrome(self):
+        if T.console():
+            self.console_chrome()
+            return
+        px, theme, root = self.px, self.theme, self.root
+        root.configure(bg=T.SHELL)
+        bar = tk.Frame(root, bg=T.HEADER, padx=px(20), pady=px(14))
+        bar.pack(fill="x")
+        tk.Label(bar, image=theme.logo(px(34), T.HEADER, *T.LOGO), bg=T.HEADER).pack(side="left")
+        label(bar, "Pharmacy Drawer", "heading", T.HEADER_TEXT, T.HEADER).pack(side="left", padx=(px(12), px(28)))
+        menu = self.button(bar, "Menu", lambda: self.popup(menu, self.main_menu()), "Header", T.HEADER)
+        menu.pack(side="right")
+        simulated = isinstance(self.hardware, Simulator)
+        tk.Label(bar, text="Simulation" if simulated else self.hardware.mode, font=theme.font("small"),
+                 fg=T.HEADER_WARNING if simulated else T.HEADER_MUTED, bg=T.HEADER).pack(side="right", padx=(px(20), px(16)))
+        self.scan_field(bar, "Scan a package to dispense or load")
+
+        body = tk.Frame(root, bg=T.SHELL)
+        # A header band the color of the shell needs no gap below it.
+        body.pack(fill="both", expand=True, padx=px(20), pady=(px(4) if T.HEADER == T.SHELL else px(20), px(20)))
+        self.frames = (bar, body)
+        body.columnconfigure(0, minsize=px(390))
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(0, weight=1)
+        self.cabinet = tk.Frame(body, bg=T.SHELL)
+        self.cabinet.grid(row=0, column=0, sticky="nsew", padx=(0, px(20)))
+        panel = ttk.Frame(body, style=theme.panel_style(), padding=px(6))
+        panel.grid(row=0, column=1, sticky="nsew")
+        self.panel = tk.Frame(panel, bg=T.SURFACE)
+        self.panel.pack(fill="both", expand=True)
+        self.scroll = ScrollFrame(self.panel, T.SURFACE)
+        self.scroll.pack(fill="both", expand=True)
+        self.content = self.scroll.body
+        # Results appear briefly along the bottom of the work panel.
+        self.status_bar = label(self.panel, font="strong", fg=T.ACCENT_DARK, bg=T.ACCENT_SOFT,
+                                textvariable=self.status_text, padx=px(44), pady=px(12), wraplength=px(640))
+
+    def scan_field(self, parent, hint):
+        self.scan = ttk.Entry(parent, style=self.theme.header_entry_style(), font=self.theme.font("scan"))
+        self.scan.pack(side="left", fill="x", expand=True)
+        self.placeholder = label(self.scan, hint, "body", T.HEADER_FIELD["placeholder"], T.HEADER_FIELD["fill"])
+        self.placeholder.place(x=self.px(16), rely=0.5, anchor="w")
+        self.placeholder.bind("<Button-1>", lambda _: self.scan.focus_set())
+        self.scan.bind("<KeyRelease>", lambda _: self.update_placeholder())
+        self.scan.bind("<FocusIn>", lambda _: self.update_placeholder())
+        self.scan.bind("<FocusOut>", lambda _: self.update_placeholder())
+        self.scan.bind("<Return>", self.find)
+
+    def update_placeholder(self):
+        if self.scan.get():
+            self.placeholder.place_forget()
+        else:
+            self.placeholder.place(x=self.px(16), rely=0.5, anchor="w")
+
+    def main_menu(self):
+        return (("Unlock a drawer...", self.manual),
+                ("Device status", lambda: self.device(self.hardware.status, lambda r: None,
+                                                      "Checking the cabinet", "status")),
+                None,
+                ("Choose catalog...", self.choose_catalog),
+                ("Export audit...", self.export_audit),
+                ("Backup...", self.backup),
+                None,
+                ("Light theme" if T.dark() else "Dark theme", self.toggle_theme),
+                ("Switch to legacy UI" if T.console() else "Switch to new UI", self.toggle_ui))
+
+    def toggle_theme(self):
+        """Switch the showing UI between light and dark, remember it, and redraw.
+        UI two and the legacy UI each remember their own theme."""
+        palette = T.OTHER_THEME[T.PALETTE]
+        T.use_palette(palette)
+        try:
+            save_palette(self.store.path.parent, palette)
+        except OSError as exc:
+            logging.warning("Could not save the theme choice: %s", exc)
+        self.theme.refresh()
+        self.redraw()
+
+    def toggle_ui(self):
+        """Switch between UI two and the legacy UI, each in its saved theme,
+        remember it, and redraw."""
+        two = not T.console()
+        directory = self.store.path.parent
+        T.use_palette(saved_palette(directory, two))
+        try:
+            save_ui(directory, "two" if two else "one")
+        except OSError as exc:
+            logging.warning("Could not save the UI choice: %s", exc)
+        self.theme.refresh()
+        self.size_limit()
+        self.detail = False
+        self.redraw()
+
+    def redraw(self):
+        if self.status_job:
+            self.root.after_cancel(self.status_job)
+            self.status_job = None
+        for frame in self.frames:
+            frame.destroy()
+        self.chrome()
+        self.home()
+
+    def popup(self, anchor, entries):
+        """Show a dropdown of (label, command[, enabled]) under `anchor`."""
+        if self.prompt:
+            return
+        menu = tk.Menu(self.root, tearoff=0, font=self.theme.font("body"),
+                       **(dict(bg=T.SURFACE, fg=T.TEXT, activebackground=T.SUBTLE, activeforeground=T.TEXT) if T.console() else {}))
+        for entry in entries:
+            if entry is None:
+                menu.add_separator()
+                continue
+            text, command, *enabled = entry
+            menu.add_command(label=text, command=lambda c=command: None if self.busy or self.prompt else c(),
+                             state="normal" if not enabled or enabled[0] else "disabled")
+        menu.tk_popup(anchor.winfo_rootx(), anchor.winfo_rooty() + anchor.winfo_height())
+
+    def notify(self, fresh=False):
+        if fresh:
+            self.status_at = time.monotonic()
+        text = self.status_text.get()
+        if self.view != "drawer" or not text or text == "Ready" or time.monotonic() - self.status_at > 2:
+            self.hide_status()
+            return
+        if T.console():
+            self.status_bar.place(relx=0, rely=1, relwidth=1, anchor="sw")  # over the event log, never the drawers' buttons
+        else:
+            self.status_bar.pack(side="bottom", fill="x", before=self.scroll)
+        if self.status_job:
+            self.root.after_cancel(self.status_job)
+        self.status_job = None if self.busy else self.root.after(6000, self.hide_status)
+
+    def hide_status(self):
+        if T.console():
+            self.status_bar.place_forget()
+        else:
+            self.status_bar.pack_forget()
+
+    def hint(self, text):
+        """Form guidance shares the status line but is not a result to announce."""
+        self.status_text.set(text)
+        self.status_at = 0.0
+
+    def clear(self):
+        for widget in self.content.winfo_children():
+            widget.destroy()
+        self.photos.clear()
+        self.load_form = None
+        self.hide_status()
+        self.scroll.top()
+
+    def button(self, parent, text, command, kind="Secondary", under=None, large=False, **kwargs):
+        def guarded():
+            if not self.busy and not self.prompt:
+                command()
+        return ttk.Button(parent, text=T.caps(text), command=guarded, style=self.theme.button_style(kind, under, large), **kwargs)
+
+    def device(self, action, done, title="Waiting for the cabinet", kind="device"):
+        """Run `action` off the UI thread behind a progress screen over the work
+        panel, so nothing beneath it can be edited or scanned into until it ends.
+        The time left comes from how long earlier steps of the same kind took."""
+        self.busy = True
+        self.status_text.set("Waiting for device response...")
+        self.root.configure(cursor="watch")
+        focus = self.root.focus_get()
+        self.scan.state(["disabled"])
+        self.repaint()
+        progress = Progress(self.panel, title, self.context)
+        estimate =self.estimates.get(kind, 0.0 if isinstance(self.hardware, Simulator) else HARDWARE_ESTIMATE)
+        expected = max(PROGRESS_SECONDS, estimate)
+        started = time.monotonic()
+        took = []
+        future = self.executor.submit(action)
+
+        def poll():
+            elapsed = time.monotonic() - started
+            if future.done() and not took:
+                took.append(elapsed)
+            if took and elapsed >= PROGRESS_SECONDS:
+                finish()
+                return
+            if took:  # Answered early: the bar catches up before the next step.
+                progress.show(elapsed / PROGRESS_SECONDS, time_left(PROGRESS_SECONDS - elapsed))
+            elif elapsed < expected:
+                progress.show(0.9 * elapsed / expected, time_left(expected - elapsed))
+            else:
+                progress.show(0.9 + 0.09 * (1 - math.exp((expected - elapsed) / expected)),
+                              "Taking longer than usual. Please wait.")
+            self.root.after(50, poll)
+
+        def finish():
+            progress.destroy()
+            self.busy = False
+            self.root.configure(cursor="")
+            if not self.prompt:
+                self.scan.state(["!disabled"])
+            if focus is not None and focus.winfo_exists():
+                focus.focus_set()
+            try:
+                result = future.result()
+            except Exception as exc:
+                result = Result(False, str(exc))
+            if result.ok:
+                self.estimates[kind] = took[0] if kind not in self.estimates else (self.estimates[kind] + took[0]) / 2
+            self.status_text.set(result.message)
+            self.settle_later()
+            done(result)
+        progress.show(0, time_left(expected))
+        self.root.after(50, poll)
+
+    # -- Guided steps: pharm.dialogs renders prompts in the work panel --------
+
+    def prompt_available(self):
+        return self.prompt is None and self.root.winfo_viewable()
+
+    def prompt_context(self):
+        return self.context
+
+    def prompt_begin(self, prompt):
+        self.prompt = prompt
+        overlay = tk.Frame(self.panel, bg=T.SURFACE)
+        overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        overlay.lift()
+        prompt.overlay = overlay
+        self.scan.state(["disabled"])
+        self.repaint()
+        return overlay
+
+    def prompt_end(self, prompt):
+        prompt.overlay.destroy()
+        if self.prompt is prompt:
+            self.prompt = None
+            if not self.busy:
+                self.scan.state(["!disabled"])
+        self.settle_later()
+
+    def prompt_head(self, body, title):
+        """Rows a heading took above a step, and how wide its text may run. The
+        legacy UI has none: its caption names the drawer."""
+        return self.console_head(body, title) if T.console() else (0, self.px(600))
+
+    # -- Cabinet --------------------------------------------------------------
+
+    def select(self, number):
+        if self.busy or self.prompt or number == self.selected and self.view == "drawer":
+            return
+        self.selected = number
+        self.home()
+
+    def home(self):
+        self.clear()
+        self.view = "drawer"
+        self.context = ""
+        compartments = self.store.compartments()
+        active = self.store.active()
+        if active:
+            self.selected = active["compartment"]
+        self.draw_cabinet(compartments, active)
+        self.drawer_panel(compartments[self.selected - 1], active)
+        # The other drawers' label photos download behind the selected one's.
+        for drawer in compartments:
+            if drawer["product"]:
+                self.background_photo(drawer["product"]["ndc"])
+        self.notify()
+        if not self.prompt:
+            self.scan.focus_set()
+        self.update_placeholder()
+
+        expiring = [(d["id"], d["product"]["expiry_date"]) for d in compartments
+                    if d["product"] and expiry_note(d["product"]["expiry_date"])[1]]
+        notice = tuple(expiring)
+        if expiring and notice != self.expiry_notice:
+            self.expiry_notice = notice
+            dialogs.showwarning("Expiring soon", "These drawers contain packages expiring within 31 days or already expired:\n" +
+                                "\n".join(f"Drawer {n}: {expiry}" for n, expiry in expiring) + "\nExpired boxes cannot be dispensed.", parent=self.root)
+
+    def draw_cabinet(self, compartments, active):
+        if T.console():
+            self.paint_console()
+            return
+        for widget in self.cabinet.winfo_children():
+            widget.destroy()
+        for index, compartment in enumerate(compartments):
+            front = self.drawer_front(compartment, active)
+            front.pack(fill="both", expand=True, pady=(self.px(12) if index else 0, 0))
+
+    def drawer_front(self, compartment, active):
+        px, theme = self.px, self.theme
+        number, product, quantity = compartment["id"], compartment["product"], compartment["quantity"]
+        selected = number == self.selected
+        state = "selected" if selected else "rest"
+        pending = bool(active and active["compartment"] == number)
+        is_open = pending or getattr(self.hardware, "selected", None) == number
+        tone = "open" if is_open else "stocked" if product and quantity else "empty"
+        accents = T.DRAWER_TONES
+        frame = ttk.Frame(self.cabinet, style=theme.front_style(state, tone), padding=(px(26 if accents else 22), px(14)),
+                          cursor="hand2")
+        frame.columnconfigure(1, weight=1)
+        frame.rowconfigure((0, 1), weight=1)
+        line = tk.Frame(frame)
+        if pending:
+            label(line, "Needs count", "small", T.SHELL_WARNING).pack(side="left")
+        elif product:
+            note, urgent = expiry_note(product["expiry_date"])
+            label(line, f"{quantity} {plural(product.get('unit', ''), quantity)}  ·  ", "small", T.SHELL_MUTED).pack(side="left")
+            label(line, note, "small", T.SHELL_DANGER if urgent else T.SHELL_MUTED).pack(side="left")
+        if is_open and accents:
+            label(line, ("  ·  " if line.winfo_children() else "") + "Open", "small", accents["open"][2]).pack(side="left")
+        parts = [
+            (label(frame, str(number), "number", accents[tone][2] if accents else T.ACCENT_LINE if selected else T.SHELL_MUTED,
+                   anchor="center"),
+             dict(row=0, column=0, rowspan=2, sticky="w", padx=(0, px(20)))),
+            (label(frame, product.get("generic_name", "Empty") if product else "Empty", "heading",
+                   T.SHELL_TEXT if product else T.SHELL_MUTED, wraplength=px(270)),
+             dict(row=0, column=1, sticky="sw")),
+            (line, dict(row=1, column=1, sticky="nw", pady=(px(2), 0))),
+        ]
+        painted = [w for w, _ in parts] + line.winfo_children()
+
+        def paint(look):
+            bg = theme.front_fill(look, tone)
+            frame.configure(style=theme.front_style(look, tone))
+            for widget in painted:
+                widget.configure(bg=bg)
+        for widget, grid in parts:
+            widget.grid(**grid)
+        for widget in painted:
+            widget.configure(cursor="hand2")
+        paint(state)
+
+        def inside(event):
+            hovered = event.widget.winfo_containing(event.x_root, event.y_root)
+            while hovered is not None and hovered is not frame:
+                hovered = hovered.master
+            return hovered is frame
+        for widget in [frame] + painted:
+            widget.bind("<Button-1>", lambda _: self.select(number))
+            if not selected:
+                widget.bind("<Enter>", lambda _: paint("hover"))
+                widget.bind("<Leave>", lambda e: None if inside(e) else paint("rest"))
+        return frame
+
+    # -- Work panel -----------------------------------------------------------
+
+    def page(self):
+        pads = (self.px(24), self.px(18)) if T.console() else (self.px(44), self.px(40))
+        page = tk.Frame(self.content, bg=T.SURFACE, padx=pads[0], pady=pads[1])
+        page.pack(fill="both", expand=True)
+        return page
+
+    def drawer_panel(self, compartment, active):
+        px = self.px
+        number, product, quantity = compartment["id"], compartment["product"], compartment["quantity"]
+        page = self.page()
+        caption = label(page, f"DRAWER {number}", "caption", T.CAPTION)
+        caption.pack(anchor="w")
+        actions = tk.Frame(page, bg=T.SURFACE)
+        actions.pack(side="bottom", fill="x", pady=(px(32), 0))
+
+        if active and active["compartment"] == number:
+            resumable = self.resumable(active)
+            caption.configure(text=f"DRAWER {number}  ·  {'UNFINISHED' if resumable else 'NEEDS COUNT'}", fg=T.WARNING)
+            label(page, f"Finish the {active['kind']}" if resumable else f"Count drawer {number}", "display").pack(anchor="w", pady=(px(8), 0))
+            detail = ("Confirm it went as recorded to save it, or count the drawer if it did not."
+                      if resumable else "Check what is physically in the drawer, then record what you find.")
+            label(page, f"A {active['kind']} was interrupted. {detail} Other drawers stay locked until this is done.",
+                  "body", T.TEXT_SOFT, wraplength=px(560)).pack(anchor="w", pady=(px(10), 0))
+            recorded = json.loads(active["product"])
+            if recorded:
+                label(page, f"Recorded: {recorded.get('generic_name', '')}  ·  lot {recorded.get('lot', '')}", "body",
+                      T.MUTED, wraplength=px(560)).pack(anchor="w", pady=(px(16), 0))
+            if self.role == "admin":
+                self.button(actions, f"Finish {active['kind']}" if resumable else f"Count drawer {number}", self.reconcile,
+                            "Warning", large=True).pack(side="left")
+            return
+
+        if not product:
+            label(page, "Empty", "display", T.FAINT).pack(anchor="w", pady=(px(8), 0))
+            label(page, "Nothing is in this drawer. Scan a package to load it.", "prompt",
+                  T.MUTED, wraplength=px(560)).pack(anchor="w", pady=(px(12), 0))
+            # Dispense keeps its place on every drawer; it is unavailable until the drawer holds stock.
+            dispense = self.button(actions, "Dispense", lambda: None, "Primary", large=True, width=-12)
+            dispense.state(["disabled"])
+            dispense.pack(side="left", padx=(0, px(12)))
+            load = self.button(actions, f"Load drawer {number}", lambda: self.loading(number), "Secondary", large=True)
+            load.pack(side="left")
+            if active or self.role != "admin":
+                load.state(["disabled"])
+            self.blocked_note(page, active)
+            return
+
+        name = label(page, product.get("generic_name", ""), "display", wraplength=px(580))
+        name.pack(anchor="w", pady=(px(8), 0))
+        page.bind("<Configure>", lambda event: name.configure(wraplength=max(px(300), event.width - px(88))), add="+")
+        strength = self.catalog.strength(product["ndc"]) if T.console() else ""
+        maker = "  ·  ".join(v for v in (strength, product.get("brand_name"), product.get("labeler_name")) if v)
+        if maker:
+            label(page, maker, "body", T.MUTED, wraplength=px(580)).pack(anchor="w", pady=(px(4), 0))
+
+        facts = tk.Frame(page, bg=T.SURFACE)
+        facts.pack(anchor="w", pady=(px(28), 0))
+        lots = sorted({i["product"]["lot"] for i in compartment["items"]}) or [product["lot"]]
+        note, urgent = expiry_note(product["expiry_date"])
+        days = expiry_days(product["expiry_date"])
+        for index, (value, font, caption_text, color) in enumerate((
+                (str(quantity), "metric", f"{plural(product.get('unit', ''), quantity)} in drawer", T.TEXT),
+                (product["expiry_date"], "title", note.lower() if urgent and days >= 0 else "expired" if urgent else "expires",
+                 T.URGENT if urgent else T.TEXT),
+                (", ".join(lots), "title", "lots" if len(lots) > 1 else "lot", T.TEXT))):
+            if index:
+                tk.Frame(facts, width=1, bg=T.BORDER).pack(side="left", fill="y", padx=px(28))
+            cell = tk.Frame(facts, bg=T.SURFACE)
+            cell.pack(side="left", anchor="s")
+            label(cell, value, font, color, wraplength=px(200)).pack(anchor="w")
+            label(cell, caption_text, "body", T.URGENT if urgent and index == 1 else T.MUTED).pack(anchor="w")
+        label(page, f"Package ID  {product['ndc']}", "mono", T.MUTED).pack(anchor="w", pady=(px(24), 0))
+        self.label_photo(page, number, product)
+
+        row = tk.Frame(actions, bg=T.SURFACE)
+        row.pack(fill="x")
+        for text, command, kind in (("Dispense", lambda: self.dispense(number), "Primary"),
+                                    ("Load more", lambda: self.loading(number), "Secondary")):
+            button = self.button(row, text, command, kind, large=True, width=-12)
+            button.pack(side="left", padx=(0, px(12)))
+            if active or (text != "Dispense" and self.role != "admin"):
+                button.state(["disabled"])
+        links = tk.Frame(actions, bg=T.SURFACE)
+        links.pack(fill="x", pady=(px(14), 0))
+        unload = self.button(links, "Unload drawer", lambda: self.unload(number), "Ghost")
+        unload.pack(side="left")
+        if active or self.role != "admin":
+            unload.state(["disabled"])
+        self.button(links, "Box records", lambda: self.box_records(number), "Ghost").pack(side="left", padx=(px(6), 0))
+        self.blocked_note(page, active)
+
+    def label_photo(self, page, number, product):
+        """The package label photo (click to enlarge). One not saved yet downloads
+        in the background and appears here when it arrives."""
+        holder = tk.Frame(page, bg=T.SURFACE)
+        holder.pack(anchor="w", pady=(self.px(20), 0))
+        self.draw_photo(holder, number, product)
+
+    def draw_photo(self, holder, number, product):
+        px = self.px
+        for widget in holder.winfo_children():
+            widget.destroy()
+        job = self.background_photo(product["ndc"])
+        waiting = job is not None and not job.done()  # read before the cache: the download may land in between
+        image = self.photo(product["ndc"], px(520), px(150))
+        if not image:
+            slot = ttk.Frame(holder, style=self.theme.frame_style("PhotoSlot.TFrame", T.SUBTLE, T.SURFACE),
+                             padding=(px(18), px(10)))
+            slot.pack(anchor="w")
+            label(slot, "Downloading the label photo..." if waiting else "No label photo available", "body", T.MUTED,
+                  bg=T.SUBTLE).pack(side="left")
+            if waiting:
+                def arrived():
+                    if not holder.winfo_exists():
+                        return
+                    if job.done():
+                        self.draw_photo(holder, number, product)
+                    else:
+                        self.root.after(PHOTO_POLL_MS, arrived)
+                self.root.after(PHOTO_POLL_MS, arrived)
+            elif job is not None:
+                def retry():
+                    self.photo_jobs.pop(identifier(product["ndc"]), None)
+                    self.draw_photo(holder, number, product)
+                self.button(slot, "Try again", retry, "Ghost", under=T.SUBTLE).pack(side="left", padx=(px(10), 0))
+            return
+        frame = ttk.Frame(holder, style=self.theme.frame_style("Photo.TFrame", T.SURFACE, T.SURFACE, outline=T.BORDER),
+                          padding=px(10), cursor="hand2")
+        frame.pack(anchor="w")
+        picture = tk.Label(frame, image=image, bg=T.SURFACE, bd=0, cursor="hand2")
+        picture.pack()
+
+        def enlarge(_event):
+            if not self.busy and not self.prompt:
+                self.package_photo(number)
+        frame.bind("<Button-1>", enlarge)
+        picture.bind("<Button-1>", enlarge)
+
+    def blocked_note(self, page, active):
+        if active:
+            note = tk.Frame(page, bg=T.SURFACE)
+            note.pack(anchor="w", pady=(self.px(24), 0))
+            label(note, f"Drawer {active['compartment']} needs a count first.", "strong", T.WARNING).pack(side="left")
+            self.button(note, f"Go to drawer {active['compartment']}", lambda: self.select(active["compartment"]),
+                        "Ghost").pack(side="left", padx=(self.px(8), 0))
+
+    def find(self, _event=None):
+        """Scan a package in the top bar to jump to its drawer and dispense, or
+        to load it into the selected drawer when no drawer holds it."""
+        scan = self.scan.get().strip()
+        self.scan.delete(0, "end")
+        self.update_placeholder()
+        if self.busy or self.prompt or not scan:
+            return "break"
+        active = self.store.active()
+        if active:
+            self.status_text.set(f"Count drawer {active['compartment']} first.")
+            return "break"
+        matches = []
+        for drawer in self.store.compartments():
+            try:
+                if drawer["product"] and self.catalog.matches(scan, drawer["product"]["ndc"]):
+                    matches.append(drawer["id"])
+            except ValueError:
+                pass
+        if not matches:
+            self.load_scan(scan)
+            return "break"
+        number = matches[0]
+        if len(matches) > 1:
+            number = dialogs.askinteger("Choose a drawer", f"This package is in drawers {', '.join(map(str, matches))}. "
+                                        "Which one?", parent=self.root, minvalue=min(matches), maxvalue=max(matches))
+            if number not in matches:
+                return "break"
+        self.selected = number
+        self.home()
+        self.dispense(number)
+        return "break"
+
+    def load_scan(self, scan):
+        """Open the selected drawer's load form filled in from `scan`. A stocked
+        drawer only takes more of what it holds, so it is not offered."""
+        try:
+            read_scan(scan)
+        except ValueError as exc:
+            self.status_text.set(str(exc))
+            return
+        compartments = self.store.compartments()
+        if T.console() and compartments[self.selected - 1]["product"]:  # no drawer is selected on its home screen
+            self.selected = next((d["id"] for d in compartments if not d["product"]), self.selected)
+        held = compartments[self.selected - 1]["product"]
+        if held:
+            self.status_text.set(f"That package is not in any drawer. Drawer {self.selected} holds "
+                                 f"{held['generic_name']}, so select an empty drawer to load it.")
+            return
+        self.loading(self.selected, scan)
+
+    def package_photo(self, number):
+        product = self.store.compartments()[number - 1]["product"]
+        if not product:
+            return
+        self.context = f"Drawer {number}"
+        image = self.photo(product["ndc"], self.px(680), self.px(420))
+        if image:
+            dialogs.showimage("Package photo", product["generic_name"], image, parent=self.root)
+
+    def saved_photo(self, ndc):
+        return cached(self.store.path.parent / "images", ndc) or cached(ROOT / "UI/images", ndc)
+
+    def background_photo(self, ndc):
+        """Download a package's label photo off the UI thread, once per package
+        per session. Returns the download, or None when a photo is already saved
+        or the package ID cannot have one. Inventory never waits on it."""
+        try:
+            key = identifier(ndc)
+        except ValueError:
+            return None
+        if self.saved_photo(ndc):
+            return None
+        job = self.photo_jobs.get(key)
+        if job is None:
+            job = self.photo_jobs[key] = Future()
+            download, directory = fetch_photo, self.store.path.parent / "images"
+
+            def fetch():
+                with self.photo_lock:  # one DailyMed request at a time
+                    try:
+                        job.set_result(download(directory, ndc))
+                    except Exception as exc:
+                        logging.info("No label photo for %s: %s", ndc, exc)
+                        job.set_exception(exc)
+            # A daemon thread: closing the window never waits for DailyMed.
+            threading.Thread(target=fetch, daemon=True).start()
+        return job
+
+    def photo(self, ndc, width, height):
+        path = self.saved_photo(ndc)
+        if not path:
+            return None
+        try:
+            try:
+                from PIL import Image, ImageTk
+                with Image.open(path) as original:
+                    original.thumbnail((width, height))
+                    photo = ImageTk.PhotoImage(original.copy())
+            except ImportError:
+                photo = tk.PhotoImage(file=str(path))
+                scale = max(1, -(-photo.width() // width), -(-photo.height() // height))
+                photo = photo.subsample(scale)
+        except (OSError, ValueError, tk.TclError):
+            return None
+        self.photos.append(photo)
+        return photo
+
+    # -- Workflows ------------------------------------------------------------
+
+    def start_access(self, kind, number, count, product, done, reason="", items=None):
+        try:
+            operation = self.store.begin(kind, number, count, product, self.operator, reason, items=items)
+            self.store.access(operation, self.operator)
+        except ValueError as exc:
+            dialogs.showerror("Cannot start", str(exc), parent=self.root)
+            return
+
+        def opened(result):
+            if not result.ok:
+                self.store.cancel(operation, self.operator, result.message,
+                                  access_attempted=result.action_attempted)
+                title = "Access uncertain" if result.action_attempted else "Arduino connection not ready"
+                dialogs.showerror(title, result.message, parent=self.root)
+                self.home()
+            else:
+                done(operation)
+        self.device(lambda: self.hardware.open(number), opened, f"Unlocking drawer {number}", "open")
+
+    def abandon(self, operation, reason):
+        self.store.cancel(operation, self.operator, reason)
+        dialogs.showwarning("Reconciliation required", "Inventory has not been finalized. Inspect "
+                            "the contents and count the drawer before further operations.", parent=self.root)
+        self.home()
+
+    def complete(self, operation):
+        self.store.finish(operation, self.operator, closed=True)
+        self.lock_after_save()
+
+    def when_done(self, operation, number, task):
+        """Nothing senses when the operator has finished with an open drawer, so
+        one press says so. Locking sooner would end the release while in use."""
+        if dialogs.askyesno(f"Drawer {number} is open", f"{task}, close the drawer, then press Done.",
+                            parent=self.root, yes="Done", no="Cancel"):
+            self.complete(operation)
+        else:
+            self.abandon(operation, f"Cancelled while drawer {number} was open")
+
+    def lock_after_save(self):
+        """Request locking after saving; a device failure does not undo inventory."""
+        def locked(result):
+            self.status_text.set("Inventory saved." if result.ok else "Inventory saved. Lock request failed: " + result.message)
+            if not result.ok:
+                dialogs.showwarning("Inventory saved", "The inventory update was saved, but the lock request failed: " + result.message, parent=self.root)
+            self.home()
+        self.device(self.hardware.lock, locked, "Inventory saved. Locking the drawers", "lock")
+
+    def loading(self, number, barcode=""):
+        self.clear()
+        self.view = "load"
+        self.selected = number
+        self.context = f"Drawer {number}"
+        px, theme = self.px, self.theme
+        self.draw_cabinet(self.store.compartments(), self.store.active())
+        old = self.store.compartments()[number - 1]["product"]
+        page = self.page()
+        console = T.console()
+        if console:
+            title = tk.Frame(page, bg=T.SURFACE)
+            title.pack(anchor="w")
+            label(title, str(number), "number", T.MUTED).pack(side="left", padx=(0, px(14)))
+            label(title, f"Load drawer {number}", "display").pack(side="left")
+        else:
+            label(page, f"LOAD  ·  DRAWER {number}", "caption", T.ACCENT_DARK).pack(anchor="w")
+            label(page, "Scan the package", "display").pack(anchor="w", pady=(px(8), 0))
+        if old:
+            label(page, f"Holds {old['generic_name']}. New boxes must be the same package.", "body", T.MUTED,
+                  wraplength=px(600)).pack(anchor="w", pady=(px(6), 0))
+        row = tk.Frame(page, bg=T.SURFACE)
+        row.pack(fill="x", pady=(px(12 if console else 20), 0))
+        if console:
+            label(row, "SCAN", "caption", T.MUTED).pack(side="left", padx=(0, px(12)))
+        scan = ttk.Entry(row, font=theme.font("scan"))
+        scan.pack(side="left", fill="x", expand=True)
+        fields, shown = {}, {}
+        scanned = [None]
+        serial_text = tk.StringVar()
+        self.hint(self.catalog.warning or "Scan a barcode, or type the package ID and press Enter.")
+
+        def search():
+            if self.busy:
+                return
+            try:
+                product, notice = self.catalog.loading_details(scan.get())
+                parsed = read_scan(scan.get())
+                # A top-up scan for the existing package preserves its lot and
+                # counted unit. A different package clears those stock fields.
+                if old and self.catalog.matches(scan.get(), old["ndc"]):
+                    product = dict(old)
+                    product.update({k: parsed[k] for k in ("lot", "expiry_date") if parsed[k]})
+                    notice = "Existing package matched. Review its lot, expiration and unit before topping up."
+                scanned[0] = parsed
+                serial_text.set("Serial " + parsed["serial"] if parsed["serial"] else "")
+                for key, entry in fields.items():
+                    entry.delete(0, "end")
+                    entry.insert(0, product.get(key, ""))
+                if shown:
+                    self.show_value(shown["strength"], self.catalog.strength(product.get("ndc")))
+                    self.show_value(shown["serial"], parsed["serial"])
+                self.hint(notice)
+                # Ready by the time the drawer is loaded and shown.
+                self.background_photo(product.get("ndc", ""))
+            except ValueError as exc:
+                dialogs.showerror("Lookup", str(exc), parent=self.root)
+        lookup = self.button(row, "Look up", search)
+        lookup.pack(side="left", fill="y", padx=(px(10), 0))
+        scan.bind("<Return>", lambda _: search())
+        notes = tk.Frame(page, bg=T.SURFACE)
+        notes.pack(fill="x", pady=(px(8), 0))
+        label(notes, font="body", fg=T.ACCENT if console else T.MUTED, textvariable=self.status_text, wraplength=px(520)).pack(side="left")
+        if console:
+            self.console_fields(page, old, number, fields, shown)
+        else:
+            label(notes, font="body", fg=T.MUTED, textvariable=serial_text).pack(side="right")
+
+            divider(page).pack(fill="x", pady=(px(24), px(4)))
+            grid = tk.Frame(page, bg=T.SURFACE)
+            grid.pack(fill="x")
+            extra = tk.Frame(page, bg=T.SURFACE)
+            for target in (grid, extra):
+                target.columnconfigure((0, 1), weight=1, uniform="fields")
+            position = {grid: [0, 0], extra: [0, 0]}
+            for key, text, span, optional in FIELDS:
+                target = extra if optional else grid
+                row_index, column = position[target]
+                if span == 2 and column:
+                    row_index, column = row_index + 1, 0
+                cell = tk.Frame(target, bg=T.SURFACE)
+                cell.grid(row=row_index, column=column, columnspan=span, sticky="ew", pady=(px(16), 0),
+                          padx=(px(10) if column else 0, px(10) if span == 1 and not column else 0))
+                label(cell, text, "strong", T.TEXT_SOFT).pack(anchor="w")
+                entry = ttk.Entry(cell, font=theme.font("input"))
+                entry.pack(fill="x", pady=(px(6), 0))
+                entry.insert(0, old.get(key, ""))
+                fields[key] = entry
+                column += span
+                position[target] = [row_index + 1, 0] if column >= 2 else [row_index, column]
+
+            def toggle_details():
+                if extra.winfo_ismapped():
+                    extra.pack_forget()
+                    details.configure(text="Show more details")
+                else:
+                    extra.pack(fill="x", after=details)
+                    details.configure(text="Hide details")
+            details = self.button(page, "Show more details", toggle_details, "Ghost")
+            details.pack(anchor="w", pady=(px(14), 0))
+        scan.focus_set()
+
+        def checked(product, items, title="Cannot load"):
+            """Report a problem now, before the operator counts or scans more boxes."""
+            try:
+                self.store.check_load(number, product, self.operator, items=items)
+                return True
+            except ValueError as exc:
+                dialogs.showerror(title, str(exc), parent=self.root)
+                return False
+
+        def load():
+            product = {key: entry.get() for key, entry in fields.items()}
+            items = None
+            if scanned[0]:
+                first = scanned[0]
+                try:
+                    same = scan.get().strip() == first["original_scan"] and self.catalog.matches(first["original_scan"], product["ndc"])
+                except ValueError:
+                    same = False
+                if not same:
+                    dialogs.showerror("Package identity", "Use the scan again and confirm the package details.", parent=self.root)
+                    return
+                items = [{"product": product, "scan": first["original_scan"], "package_ndc": identifier(product["ndc"])}]
+            if not checked(product, items):
+                return
+            count = dialogs.askinteger("Load quantity", f"How many {plural(product['unit'] or 'unit', 2)} are you adding "
+                                       f"to drawer {number}?", minvalue=1, parent=self.root)
+            if count is None:
+                return
+            if items:
+                for index in range(1, count):
+                    next_scan = dialogs.askstring("Scan each unit", f"Scan package {index + 1} of {count} before loading.",
+                                                  parent=self.root, scan=True)
+                    if next_scan is None:
+                        return
+                    try:
+                        same = self.catalog.matches(next_scan, product["ndc"])
+                    except ValueError:
+                        same = False
+                    if not same:
+                        dialogs.showerror("Different package", "All units must have the same package identity.", parent=self.root)
+                        return
+                    parsed = read_scan(next_scan)
+                    item_product = {**product, **{k: parsed[k] for k in ("lot", "expiry_date") if parsed[k]}}
+                    item = {"product": item_product, "scan": next_scan, "package_ndc": identifier(product["ndc"])}
+                    if not checked(product, items + [item], f"Package {index + 1} of {count}"):
+                        return
+                    items.append(item)
+
+            def opened(operation):
+                self.when_done(operation, number, f"Place the {count} {plural(product['unit'] or 'unit', count)}")
+            self.start_access("load", number, count, product, opened, items=items)
+
+        footer = tk.Frame(page, bg=T.SURFACE)
+        footer.pack(fill="x", pady=(px(14 if console else 32), 0))
+        submit = self.button(footer, "Confirm and load", load, "Primary", large=True)
+        submit.pack(side="left", fill="x", expand=console)
+        self.button(footer, "Cancel", self.home, large=True).pack(side="left", padx=(px(12), 0))
+        self.load_form = {"scan": scan, "fields": fields, "lookup": lookup, "load": submit}
+        if barcode:
+            scan.insert(0, barcode)
+            search()
+
+    def dispense(self, number):
+        self.context = f"Drawer {number}"
+        item = self.store.compartments()[number - 1]
+        product = item["product"]
+        count = dialogs.askinteger("Dispense", f"How many {plural(product.get('unit', 'unit'), 2)} of {product.get('generic_name', 'this product')}? "
+                                   f"{item['quantity']} in the drawer.", minvalue=1, maxvalue=item["quantity"], parent=self.root,
+                                   initialvalue=1)
+        if count is None:
+            return
+        scans = []  # (serial, time) of each unit verified, for UI two's list
+
+        def opened(operation):
+            index, error = self.store.operation(operation)["verified"], ""
+            while index < count:
+                if T.console():
+                    scan = dialogs.askstring("Verify package", f"Scan {product['unit']} {index + 1} of {count}", parent=self.root,
+                                             scan=True, error=error, steps=self.dispense_steps(scans, count), reopen=True)
+                else:
+                    scan = dialogs.askstring("Verify package", f"Scan item {index + 1} of {count}: {product['generic_name']} "
+                                             f"({product['ndc']}). Submit an empty scan to request drawer access again.",
+                                             parent=self.root, scan=True, error=error)
+                if scan is None:
+                    self.abandon(operation, f"Scan cancelled after {index} verified items")
+                    return
+                if not scan.strip():
+                    number = self.store.note_reopen(operation, self.operator)
+
+                    def reopened(result):
+                        if result.ok:
+                            opened(operation)
+                        else:
+                            self.abandon(operation, result.message)
+                    self.device(lambda: self.hardware.open(number), reopened)
+                    return
+                # A misread or a different box is rejected and scanned again;
+                # only a verified scan counts toward the units removed.
+                try:
+                    if not self.catalog.matches(scan, product["ndc"]):
+                        raise ValueError("This is a different package.")
+                    self.store.verify_one(operation, self.operator, scan, package_ndc=identifier(product["ndc"]))
+                except ValueError as exc:
+                    logging.warning("Rejected verification scan %r: %s", scan, exc)
+                    error = f"{exc} Scan the box again."
+                    continue
+                scans.append((read_scan(scan)["serial"], datetime.now().strftime("%H:%M:%S")))
+                index, error = index + 1, ""
+            # Every unit was scanned as it was removed, which is the count.
+            self.complete(operation)
+        self.start_access("dispense", number, count, {}, opened)
+
+    def unload(self, number):
+        self.context = f"Drawer {number}"
+        if not dialogs.askyesno("Unload", f"Remove all stock from drawer {number}?", parent=self.root,
+                                yes="Unload drawer", no="Cancel", danger=True):
+            return
+
+        self.start_access("unload", number, 0, {}, lambda operation: self.when_done(operation, number, "Remove everything"))
+
+    def manual(self):
+        self.context = ""
+        number = dialogs.askinteger("Unlock a drawer", "Which drawer? (1 to 4)", minvalue=1, maxvalue=4, parent=self.root)
+        if number is None:
+            return
+        self.context = f"Drawer {number}"
+        reason = dialogs.askstring("Unlock a drawer", "Why does it need to be opened? (Optional)", parent=self.root)
+        if reason is None:
+            return
+        def opened(operation):
+            self.reconcile()
+            if self.store.active():
+                self.home()
+        self.start_access("manual", number, 0, {}, opened, reason)
+
+    def resumable(self, active):
+        """An interrupted access whose outcome the records already describe:
+        confirming it saves normally, with no count."""
+        return (active and active["state"] == "access" and active["kind"] in ("load", "dispense", "unload")
+                and (active["kind"] != "dispense" or active["verified"] == active["requested"]))
+
+    def reconcile(self):
+        active = self.store.active()
+        if not active:
+            self.home()
+            return
+        self.context = f"Drawer {active['compartment']}"
+        product = json.loads(active["product"])
+        if self.resumable(active):
+            count, unit = active["requested"], product.get("unit", "")
+            question = {
+                "dispense": f"All {count} scanned. Have exactly {count} {unit} been removed?",
+                "load": f"Have exactly {count} {unit} been placed in drawer {active['compartment']}?",
+                "unload": "Have all contents been removed and the drawer checked empty?",
+            }[active["kind"]]
+            if dialogs.askyesno(f"Finish {active['kind']}", question, parent=self.root, yes="Yes, finish", no="No, count drawer"):
+                self.complete(active["id"])
+                return
+        candidates = self.store.reconciliation_items(active["id"])
+        remaining_ids = None
+        if any(i["serial"] for i in candidates) or len({json.dumps(i["product"], sort_keys=True) for i in candidates}) > 1:
+            # Serial numbers or mixed lots: a count alone cannot identify the boxes.
+            choices = [f"Lot {i['product']['lot']}  ·  expires {i['product']['expiry_date']}  ·  serial {i['serial'] or 'not recorded'}"
+                       for i in candidates]
+            selected = dialogs.askchoices("Count drawer", "When finished, tick each box still in the drawer, close it, then continue.",
+                                          choices, parent=self.root)
+            if selected is None:
+                return
+            remaining_ids = [candidates[n]["id"] for n in selected]
+            count = len(remaining_ids)
+        else:
+            count = dialogs.askinteger("Count drawer", f"How many of {product.get('generic_name', 'the recorded product')} "
+                                       f"(lot {product.get('lot', 'unknown')}) are physically in the drawer? "
+                                       "When finished, close the drawer and continue to save this count.",
+                                       minvalue=0, parent=self.root)
+            if count is None:
+                return
+        self.store.reconcile(active["id"], count, self.operator, "", closed=True, remaining_ids=remaining_ids)
+        self.lock_after_save()
+
+    def box_records(self, number):
+        self.context = f"Drawer {number}"
+        items = self.store.compartments()[number - 1]["items"]
+        rows = [(i["product"]["lot"], i["product"]["expiry_date"], i["serial"] or "not recorded") for i in items]
+        dialogs.showrecords("Box records", ("Lot", "Expires", "Serial"), rows, parent=self.root,
+                            message=f"{len(rows)} recorded {'box' if len(rows) == 1 else 'boxes'}")
+
+    # -- UI two: every drawer stays in view as an equal column ------------------
+    # While one is worked on its column widens to hold the work panel and the
+    # others narrow. The workflows above run unchanged in both layouts. Matches
+    # the UI two section of UI/web/cabinet.css.
+
+    def console_chrome(self):
+        px, theme, root = self.px, self.theme, self.root
+        root.configure(bg=T.SHELL)
+        bar = tk.Frame(root, bg=T.HEADER, padx=px(16), pady=px(12))
+        bar.pack(fill="x")
+        rule = tk.Frame(root, height=1, bg=T.BORDER)
+        rule.pack(fill="x")
+        tk.Label(bar, image=theme.logo(px(26), T.HEADER, *T.LOGO), bg=T.HEADER).pack(side="left")
+        label(bar, "PHARMACY DRAWER", "heading", T.HEADER_TEXT, T.HEADER).pack(side="left", padx=(px(8), px(20)))
+        menu = self.button(bar, "Menu", lambda: self.popup(menu, self.main_menu()), "Header", T.HEADER)
+        menu.pack(side="right")
+        mode = "Simulation" if isinstance(self.hardware, Simulator) else self.hardware.mode
+        tk.Label(bar, text=mode.upper(), font=theme.font("caption"), fg=T.MUTED, bg=T.HEADER, padx=px(10), pady=px(5),
+                 highlightthickness=1, highlightbackground=T.BORDER_STRONG).pack(side="right", padx=(px(20), px(12)))
+        field = tk.Frame(bar, bg=T.SURFACE, padx=px(14))
+        field.pack(side="left", fill="x", expand=True)
+        label(field, "SCAN", "caption", T.MUTED, T.SURFACE).pack(side="left")
+        self.scan_field(field, "Ready for a package")
+
+        log = tk.Frame(root, bg=T.SHELL, padx=px(16), pady=px(8))
+        log.pack(side="bottom", fill="x")
+        rule_low = tk.Frame(root, height=1, bg=T.BORDER)
+        rule_low.pack(side="bottom", fill="x")
+        heading = tk.Frame(log, bg=T.SHELL)
+        heading.pack(fill="x")
+        label(heading, "RECENT ACTIVITY", "caption", T.MUTED, T.SHELL).pack(side="left")
+        self.button(heading, "Export audit", self.export_audit, "Ghost", T.SHELL).pack(side="right")
+        self.log_rows = tk.Frame(log, bg=T.SHELL)
+        self.log_rows.pack(fill="x")
+        self.log_rows.columnconfigure(1, weight=1)
+        self.status_bar = label(log, font="strong", fg=T.ACCENT, bg=T.ACCENT_SOFT, textvariable=self.status_text,
+                                padx=px(16), pady=px(12), wraplength=px(1000), highlightthickness=1, highlightbackground=T.ACCENT)
+
+        body = tk.Frame(root, bg=T.SHELL)
+        body.pack(fill="both", expand=True, padx=px(10), pady=px(12))
+        body.rowconfigure(0, weight=1)
+        self.frames = (bar, rule, log, rule_low, body)
+        self.cabinet = body
+        self.panel_box = tk.Frame(body, bg=T.SURFACE, highlightthickness=px(2))
+        self.panel = tk.Frame(self.panel_box, bg=T.SURFACE)
+        self.panel.pack(fill="both", expand=True)
+        self.scroll = ScrollFrame(self.panel, T.SURFACE)
+        self.scroll.pack(fill="both", expand=True)
+        self.content = self.scroll.body
+        self.panel_close = self.button(self.panel, "Close", self.close_detail, "Ghost")
+
+    def show_detail(self, number):
+        self.selected, self.detail = number, True
+        self.home()
+
+    def close_detail(self):
+        self.detail = False
+        self.home()
+
+    def show_value(self, entry, value):
+        """Set a read-only entry."""
+        entry.state(["!readonly"])
+        entry.delete(0, "end")
+        entry.insert(0, value)
+        entry.state(["readonly"])
+
+    def repaint(self):
+        if T.console():
+            self.paint_console()
+
+    def settle_later(self):
+        """A step can end with nothing after it, which leaves no one to redraw."""
+        if T.console():
+            self.root.after_idle(lambda: None if self.prompt or self.busy else self.paint_console())
+
+    def context_drawer(self):
+        digits = "".join(c for c in self.context if c.isdigit())
+        return int(digits) if digits in ("1", "2", "3", "4") else 0
+
+    def focus_drawer(self, active):
+        """The drawer whose column holds the panel. 0 shows only the drawers;
+        5 puts the panel after them, for a step about no one drawer."""
+        if self.view == "load":
+            return self.selected
+        if self.prompt or self.busy:
+            return self.context_drawer() or 5
+        return self.selected if active or self.detail else 0
+
+    def paint_console(self):
+        px = self.px
+        compartments, active = self.store.compartments(), self.store.active()
+        focus = self.focus_drawer(active)
+        working = bool(self.prompt or self.busy or self.view == "load")
+        for widget in self.cabinet.winfo_children():
+            if widget is not self.panel_box:
+                widget.destroy()
+        for column in range(5):
+            wide, used = column == focus - 1, column < 4 or focus == 5
+            self.cabinet.columnconfigure(column, weight=4 if wide else 1 if used else 0, uniform="columns" if used else "")
+        for compartment in compartments:
+            number = compartment["id"]
+            if number != focus:
+                column = self.tile(compartment, working or bool(active)) if focus else self.channel(compartment)
+                column.grid(row=0, column=number - 1, sticky="nsew", padx=px(6))
+        if focus:
+            self.panel_box.grid(row=0, column=focus - 1, sticky="nsew", padx=px(6))
+        else:
+            self.panel_box.grid_remove()
+        if working:
+            self.hide_status()  # as in the legacy UI, where the step covers it
+        edge = (T.WARNING if active and (active["state"] == "reconciliation" or not working) else
+                T.ACCENT if working else T.BORDER)
+        self.panel_box.configure(highlightbackground=edge, highlightcolor=edge)
+        if self.detail and not working and not active:
+            self.panel_close.place(relx=1, x=-px(16), y=px(10), anchor="ne")
+            self.panel_close.lift()
+        else:
+            self.panel_close.place_forget()
+        if self.prompt:
+            note = f"{self.context}  ·  {self.prompt.title}" if self.context else self.prompt.title
+        elif self.busy:
+            note = "Please wait"
+        elif self.view == "load":
+            note = f"Load  ·  Drawer {self.selected}"
+        else:
+            note = f"Drawer {active['compartment']} needs a count" if active else "Ready for a package"
+        waiting = working or bool(active)
+        self.placeholder.configure(text=note.upper() if waiting else note, fg=T.ACCENT if waiting else T.HEADER_FIELD["placeholder"])
+        for widget in self.log_rows.winfo_children():
+            widget.destroy()
+        lines = activity.recent(self.store, 3)
+        for row, line in enumerate(lines):
+            label(self.log_rows, line["when"], "mono_small", T.MUTED, T.SHELL).grid(row=row, column=0, sticky="nw", padx=(0, px(16)), pady=px(2))
+            label(self.log_rows, line["text"], "body", T.WARNING if line["attention"] else T.TEXT, T.SHELL,
+                  wraplength=px(1000)).grid(row=row, column=1, sticky="w", pady=px(2))
+        if not lines:
+            label(self.log_rows, "Nothing yet", "body", T.MUTED, T.SHELL).grid(row=0, column=0, sticky="w", pady=px(2))
+
+    def channel(self, compartment):
+        """A drawer's column, with everything about it in view and its actions on it."""
+        px = self.px
+        number, product, quantity = compartment["id"], compartment["product"], compartment["quantity"]
+        days = expiry_days(product["expiry_date"]) if product else None
+        urgent = days is not None and days <= 31
+        fill = T.SURFACE if product else T.IDLE
+        frame = tk.Frame(self.cabinet, bg=fill, padx=px(18), pady=px(16), highlightthickness=1,
+                         highlightbackground=T.WARNING if urgent else T.BORDER, highlightcolor=T.WARNING if urgent else T.BORDER)
+        # The actions pack first, so a short window clips details and never them.
+        actions = tk.Frame(frame, bg=fill)
+        actions.pack(side="bottom", fill="x")
+        top = tk.Frame(frame, bg=fill)
+        top.pack(fill="x")
+        label(top, str(number), "number", T.MUTED, fill).pack(side="left")
+        who = tk.Frame(frame, bg=fill, height=px(84))
+        who.pack(fill="x", pady=(px(12), 0))
+        who.pack_propagate(False)
+        if not product:
+            label(who, "Empty", "drawer_name", T.MUTED, fill).pack(anchor="w")
+            label(frame, "0", "count", T.MUTED, fill).pack(anchor="w")
+            self.button(actions, f"Load drawer {number}", lambda: self.loading(number), under=fill).pack(fill="x")
+            return frame
+        tag = "Open" if getattr(self.hardware, "selected", None) == number else "Expired" if days < 0 else "Expires soon" if urgent else ""
+        if tag:
+            tk.Label(top, text=tag.upper(), font=self.theme.font("caption"), fg=T.SHELL, bg=T.ACCENT if tag == "Open" else T.WARNING,
+                     padx=px(8), pady=px(4)).pack(side="right", anchor="n")
+        strength = self.catalog.strength(product["ndc"])
+        name = label(who, capitalized(product.get("generic_name", "")), "drawer_name", T.TEXT, fill)
+        name.pack(anchor="w")
+        maker = label(who, "  ·  ".join(v for v in (strength, product.get("labeler_name")) if v), "body", T.MUTED, fill)
+        maker.pack(anchor="w", pady=(px(2), 0))
+        frame.bind("<Configure>", lambda event: [w.configure(wraplength=max(px(120), event.width - px(40))) for w in (name, maker)])
+        stock = tk.Frame(frame, bg=fill)
+        stock.pack(anchor="w")
+        label(stock, str(quantity), "count", T.TEXT, fill).pack(side="left")
+        label(stock, plural(product.get("unit", ""), quantity), "heading", T.MUTED, fill).pack(side="left", anchor="s", padx=(px(10), 0), pady=(0, px(14)))
+        tone = T.WARNING if urgent else T.MUTED
+        life = tk.Frame(frame, bg=fill)
+        life.pack(fill="x", pady=(px(4), 0))
+        label(life, "EXPIRES", "small", T.MUTED, fill).pack(side="left")
+        label(life, product["expiry_date"], "mono_small", T.WARNING if urgent else T.TEXT, fill).pack(side="right")
+        gauge = tk.Canvas(frame, height=px(12), bg=fill, highlightthickness=0, bd=0)
+        gauge.pack(fill="x", pady=(px(4), 0))
+
+        def draw(event):
+            middle, thick = px(6), px(6)
+            gauge.delete("all")
+            gauge.create_line(0, middle, event.width, middle, fill=T.BORDER, width=thick)
+            gauge.create_line(0, middle, event.width * max(0, min(1, days / 365)), middle, fill=tone, width=thick)
+            gauge.create_line(event.width * 31 / 365, 0, event.width * 31 / 365, px(12), fill=T.TEXT)  # the 31-day warning line
+        gauge.bind("<Configure>", draw)
+        left = "Expired" if days < 0 else "Expires today" if days == 0 else f"{days} day{'' if days == 1 else 's'} left"
+        label(frame, left, "small", tone, fill).pack(anchor="w", pady=(px(2), 0))
+        lots = sorted({i["product"]["lot"] for i in compartment["items"]}) or [product["lot"]]
+        self.facts(frame, (("Lots" if len(lots) > 1 else "Lot", ", ".join(lots)), ("Package", product["ndc"])), fill).pack(fill="x", pady=(px(10), 0))
+        # Dispense takes what is left, so the other two always fit.
+        self.button(actions, "More", lambda: self.show_detail(number), under=fill).pack(side="right", padx=(px(8), 0))
+        load = self.button(actions, "Load", lambda: self.loading(number), under=fill)
+        load.pack(side="right", padx=(px(8), 0))
+        dispense = self.button(actions, "Dispense", lambda: self.dispense(number), "Primary", fill)
+        dispense.pack(side="left", fill="x", expand=True)
+        if self.role != "admin":
+            load.state(["disabled"])
+        return frame
+
+    def tile(self, compartment, held):
+        """A narrow column for each other drawer while one is being worked on."""
+        px = self.px
+        number, product, quantity = compartment["id"], compartment["product"], compartment["quantity"]
+        frame = tk.Frame(self.cabinet, bg=T.IDLE, padx=px(14), pady=px(16), highlightthickness=1,
+                         highlightbackground=T.BORDER, highlightcolor=T.BORDER, cursor="hand2")
+        parts = [label(frame, str(number), "number", T.MUTED, T.IDLE)]
+        name = label(frame, capitalized(product.get("generic_name", "")) if product else "Empty", "strong", T.MUTED, T.IDLE)
+        frame.bind("<Configure>", lambda event: name.configure(wraplength=max(px(80), event.width - px(32))))
+        parts += [name, label(frame, str(quantity), "tile_count", T.MUTED, T.IDLE)]
+        days = expiry_days(product["expiry_date"]) if product else None
+        if days is not None and days <= 31:
+            left = "Expired" if days < 0 else "Expires today" if days == 0 else f"{days} day{'' if days == 1 else 's'} left"
+            parts.append(label(frame, left, "strong", T.WARNING, T.IDLE))
+        for part in parts:
+            part.pack(anchor="w", pady=(0, px(6)))
+        if held:
+            parts.append(label(frame, "HELD", "caption", T.MUTED, T.IDLE))
+            parts[-1].pack(side="bottom", anchor="w")
+        for widget in [frame] + parts:
+            widget.configure(cursor="hand2")
+            widget.bind("<Button-1>", lambda _: self.select(number))
+        return frame
+
+    def facts(self, parent, rows, bg):
+        """Short name and value pairs, the value at the right."""
+        grid = tk.Frame(parent, bg=bg)
+        grid.columnconfigure(1, weight=1)
+        for row, (name, value, *color) in enumerate(rows):
+            label(grid, name.upper(), "small", T.MUTED, bg).grid(row=row, column=0, sticky="w", padx=(0, self.px(12)))
+            label(grid, value, "mono_small", color[0] if color else T.TEXT, bg, anchor="e", justify="right",
+                  wraplength=self.px(170)).grid(row=row, column=1, sticky="e")
+        return grid
+
+    def console_head(self, body, title):
+        """A step's heading names its drawer, and while dispensing keeps the label
+        and stock details beside it. Returns the rows used and the text width."""
+        px = self.px
+        number = self.context_drawer()
+        if not number:
+            return 0, px(640)
+        product = self.store.compartments()[number - 1]["product"]
+        head = tk.Frame(body, bg=T.SURFACE)
+        head.grid(row=0, column=0, columnspan=2, sticky="ew")
+        top = tk.Frame(head, bg=T.SURFACE)
+        top.pack(anchor="w")
+        label(top, str(number), "number", T.MUTED).pack(side="left")
+        if title == "Verify package" or title.endswith(" is open"):
+            tk.Label(top, text="OPEN", font=self.theme.font("caption"), fg=T.SHELL, bg=T.ACCENT, padx=px(8), pady=px(4)).pack(side="left", padx=(px(14), 0))
+        if product:
+            label(head, capitalized(product.get("generic_name", "")), "display", wraplength=px(640)).pack(anchor="w", pady=(px(6), 0))
+            maker = "  ·  ".join(v for v in (self.catalog.strength(product["ndc"]), product.get("labeler_name")) if v)
+            if maker:
+                label(head, maker, "body", T.MUTED, wraplength=px(640)).pack(anchor="w")
+        if not product or title not in ("Dispense", "Verify package"):
+            return 1, px(640)
+        body.columnconfigure(0, minsize=px(300))
+        side = tk.Frame(body, bg=T.SURFACE)
+        side.grid(row=1, column=1, rowspan=20, sticky="n", padx=(px(24), 0), pady=(px(12), 0))
+        image = self.photo(product["ndc"], px(218), px(130))
+        if image:
+            tk.Label(side, image=image, bg="#ffffff", padx=px(6), pady=px(6)).pack(fill="x")
+        urgent = expiry_days(product["expiry_date"]) <= 31
+        self.facts(side, (("Lot", product["lot"]), ("Package", product["ndc"]),
+                          ("Expires", product["expiry_date"], T.WARNING if urgent else T.TEXT)), T.SURFACE).pack(fill="x", pady=(px(10), 0))
+        return 1, px(400)
+
+    def dispense_steps(self, scans, count):
+        """The last unit verified, the one to scan and the next, so any count fits the panel."""
+        rows = []
+        for index in range(max(0, len(scans) - 1), min(count, len(scans) + 2)):
+            if index < len(scans):
+                rows.append((index + 1, "Verified", *scans[index], ""))
+            else:
+                rows.append((index + 1, "Scan now", "", "", "now") if index == len(scans) else (index + 1, "Waiting", "", "", "later"))
+        return rows
+
+    def console_fields(self, page, old, number, fields, shown):
+        """UI two's load form: three columns, with the fields to check against
+        the label outlined. `fields` are editable; `shown` are read-only."""
+        px, theme = self.px, self.theme
+        grid = tk.Frame(page, bg=T.SURFACE)
+        grid.pack(fill="x", pady=(px(10), 0))
+        grid.columnconfigure((0, 1, 2), weight=1, uniform="fields")
+        review = theme.entry_style("Review.TEntry", outline=T.ACCENT, padding=(10, 8))
+        for index, (key, text) in enumerate(CONSOLE_FIELDS):
+            cell = tk.Frame(grid, bg=T.SURFACE)
+            cell.grid(row=index // 3, column=index % 3, columnspan=3 if key == "description" else 1, sticky="ew",
+                      pady=(px(10) if index >= 3 else 0, 0), padx=(px(12) if index % 3 else 0, 0))
+            label(cell, text.upper(), "small", T.MUTED).pack(anchor="w")
+            options = dict(style=review) if key in ("lot", "expiry_date", "unit") else {}
+            entry = ttk.Entry(cell, font=theme.font("mono_small" if key in ("ndc", "lot", "expiry_date", "serial") else "body"), **options)
+            entry.pack(fill="x", pady=(px(4), 0))
+            if key in ("strength", "serial"):
+                shown[key] = entry
+                self.show_value(entry, self.catalog.strength(old["ndc"]) if key == "strength" and old else "")
+            else:
+                entry.insert(0, old.get(key, ""))
+                fields[key] = entry
+
+    def export_audit(self):
+        path = filedialog.asksaveasfilename(parent=self.root, defaultextension=".csv", filetypes=[("CSV", "*.csv")])
+        if path:
+            with open(path, "w", newline="", encoding="utf-8") as file:
+                writer = csv.DictWriter(file, fieldnames=["id", "time", "operator", "operation", "action", "detail"])
+                writer.writeheader()
+                for row in self.store.audit():
+                    writer.writerow({k: "'" + v if isinstance(v, str) and v.startswith(("=", "+", "-", "@", "\t", "\r")) else v
+                                     for k, v in row.items()})
+            self.status_text.set("Audit exported.")
+
+    def choose_catalog(self):
+        path = filedialog.askopenfilename(parent=self.root, title="Choose package catalog",
+                                          filetypes=[("JSON catalog", ("*.json", "*.json.xz", "*.json.gz"))])
+        if not path:
+            return
+        catalog = Catalog(path)
+        if catalog.warning:
+            dialogs.showerror("Catalog unavailable", catalog.warning, parent=self.root)
+            return
+        # Persist only a validated path, separately for simulation and bench.
+        settings = self.store.path.parent / "catalog-path.json"
+        temporary = settings.with_suffix(".tmp")
+        temporary.write_text(json.dumps(str(Path(path).resolve())), encoding="utf-8")
+        temporary.replace(settings)
+        self.catalog = catalog
+        self.status_text.set(f"Catalog selected: {Path(path).name}")
+        self.home()
+
+    def backup(self):
+        path = filedialog.asksaveasfilename(parent=self.root, defaultextension=".sqlite3", filetypes=[("SQLite backup", "*.sqlite3")])
+        if path:
+            self.store.backup(path)
+            self.status_text.set("Consistent database backup created.")
+
+    def close(self):
+        if getattr(self, "prompt", None):
+            self.prompt.close()  # Closing the window answers the current step with Cancel.
+            return
+        if self.busy:
+            dialogs.showinfo("Please wait", "Wait for the device request to finish before closing.", parent=self.root)
+            return
+        # An unfinished operation is saved and shown again on the next start.
+        self.executor.shutdown(wait=False, cancel_futures=True)
+        self.hardware.close()
+        self.root.destroy()
+
+
+def choose_usb_port(root):
+    """Select explicitly. Enumeration is read-only; selection does not open the port."""
+    theme = T.apply_theme(root)
+    px = theme.px
+    dialog = tk.Toplevel(root)
+    dialog.title("Connect Arduino Uno / Nano by USB")
+    dialog.resizable(False, False)
+    dialog.configure(bg=T.SURFACE)
+    frame = tk.Frame(dialog, bg=T.SURFACE, padx=px(28), pady=px(26))
+    frame.pack(fill="both")
+    label(frame, "Select the Arduino's COM port", "heading").pack(anchor="w")
+    label(frame, "Select the adapter matching the installed firmware. Selecting a port does not send commands. "
+          "Automatic locking on closure still requires verification of the lock/sensors.", "small", T.MUTED,
+          wraplength=px(500)).pack(anchor="w", pady=(px(6), px(16)))
+    choices = ttk.Combobox(frame, width=56, state="readonly", font=theme.font("body"))
+    choices.pack(fill="x")
+    notice = tk.StringVar()
+    label(frame, font="small", fg=T.TEXT_SOFT, textvariable=notice, wraplength=px(500)).pack(anchor="w", pady=(px(8), 0))
+    ports = []
+    selected = []
+
+    def refresh():
+        nonlocal ports
+        choices.set("")
+        try:
+            ports = usb_ports()
+            choices["values"] = [f"{device} | {description}" for device, description in ports]
+            notice.set("Select the port shown for your Arduino in Windows Device Manager." if ports else
+                       "No serial ports found. Connect the Arduino with a data-capable USB cable, then refresh.")
+        except (ValueError, OSError) as exc:
+            ports = []
+            choices["values"] = []
+            notice.set(str(exc))
+
+    def select():
+        index = choices.current()
+        if index < 0 or index >= len(ports):
+            dialogs.showerror("USB setup", "Select a port first.", parent=dialog)
+            return
+        selected.append(ports[index][0])
+        dialog.destroy()
+
+    row = tk.Frame(frame, bg=T.SURFACE)
+    row.pack(fill="x", pady=(px(24), 0))
+    ttk.Button(row, text="Use selected port", command=select, style=theme.button_style("Primary")).pack(side="left")
+    ttk.Button(row, text="Refresh ports", command=refresh, style=theme.button_style("Secondary")).pack(side="left", padx=(px(10), 0))
+    ttk.Button(row, text="Cancel", command=dialog.destroy, style=theme.button_style("Secondary")).pack(side="right")
+    refresh()
+    dialog.update_idletasks()
+    dialog.geometry(f"+{(dialog.winfo_screenwidth() - dialog.winfo_reqwidth()) // 2}"
+                    f"+{(dialog.winfo_screenheight() - dialog.winfo_reqheight()) // 3}")
+    dialog.grab_set()
+    root.wait_window(dialog)
+    return selected[0] if selected else None
+
+
+def _palette_file(directory, two):
+    """Where UI two's theme or the legacy UI's is remembered."""
+    return directory / ("console-appearance.json" if two else "appearance.json")
+
+
+def saved_palette(directory, two=False):
+    """UI two's saved palette, dark unless light was chosen, or the legacy UI's,
+    light unless dark was chosen."""
+    choices = T.CONSOLE if two else ("light", "dark")
+    try:
+        value = json.loads(_palette_file(directory, two).read_text(encoding="utf-8"))
+        return value if value in choices else choices[0]
+    except (OSError, ValueError):
+        return choices[0]
+
+
+def save_palette(directory, palette):
+    settings = _palette_file(directory, palette in T.CONSOLE)
+    temporary = settings.with_suffix(".tmp")
+    temporary.write_text(json.dumps(palette), encoding="utf-8")
+    temporary.replace(settings)
+
+
+def saved_ui(directory):
+    """UI two unless the legacy UI ("one") was chosen."""
+    try:
+        return "one" if json.loads((directory / "ui.json").read_text(encoding="utf-8")) == "one" else "two"
+    except (OSError, ValueError):
+        return "two"
+
+
+def startup_palette(directory):
+    """The saved UI in its saved theme."""
+    return saved_palette(directory, saved_ui(directory) == "two")
+
+
+def save_ui(directory, ui):
+    settings = directory / "ui.json"
+    temporary = settings.with_suffix(".tmp")
+    temporary.write_text(json.dumps(ui), encoding="utf-8")
+    temporary.replace(settings)
+
+
+def saved_catalog_path(directory, default):
+    try:
+        value = json.loads((directory / "catalog-path.json").read_text(encoding="utf-8"))
+        return Path(value) if isinstance(value, str) and value.strip() else default
+    except (OSError, ValueError):
+        return default
+
+
+def use_native_resolution():
+    """Render at the display's real resolution. Without this, Windows
+    bitmap-stretches the window on scaled displays and text looks blurry."""
+    if sys.platform != "win32":
+        return
+    import ctypes
+    try:
+        # Group the taskbar button under the app's own icon, not Python's.
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("EPICS.PharmacyDrawer")
+    except (AttributeError, OSError):
+        pass
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except (AttributeError, OSError):
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except (AttributeError, OSError):
+            pass
+
+
+def size_window(root):
+    theme = T.apply_theme(root)
+    width, height = root.winfo_screenwidth(), root.winfo_screenheight()
+    w, h = min(theme.px(1240), int(width * 0.92)), min(theme.px(840), int(height * 0.86))
+    root.geometry(f"{w}x{h}+{(width - w) // 2}+{max(0, (height - h) // 2 - theme.px(16))}")
+    root.pharm_sized = True
+
+
+def load_catalog(root, path):
+    """Parse the catalog off the UI thread behind a splash screen.
+
+    Returns None if the window is closed while loading."""
+    splash = Splash(root)
+    root.update()
+    result = {}
+
+    def work():
+        try:
+            result["catalog"] = Catalog(path)
+        except BaseException as exc:
+            result["error"] = exc
+    worker = threading.Thread(target=work, daemon=True)
+    worker.start()
+    done = tk.BooleanVar(root, False)
+    closed = []
+
+    def poll():
+        if worker.is_alive():
+            root.after(40, poll)
+        else:
+            done.set(True)
+
+    def cancel():
+        closed.append(True)
+        done.set(True)
+    root.protocol("WM_DELETE_WINDOW", cancel)
+    root.after(40, poll)
+    root.wait_variable(done)
+    if closed:
+        root.destroy()
+        return None
+    splash.destroy()
+    if "error" in result:
+        raise result["error"]
+    return result["catalog"]
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser()
+    connection = parser.add_mutually_exclusive_group()
+    connection.add_argument("--hardware-bench", action="store_true", help="Legacy Pi HTTPS adapter")
+    connection.add_argument("--usb", action="store_true", help="Select an Arduino Uno/Nano COM port for direct USB bench testing")
+    connection.add_argument("--team-usb", action="store_true", help="Use the team's byte-echo / pressure-sensor firmware")
+    parser.add_argument("--data-dir", type=Path)
+    parser.add_argument("--catalog", type=Path, help="Package catalog JSON; otherwise use the saved selection")
+    parser.add_argument("--smoke-test", action="store_true", help="Render screens and exit without hardware access")
+    args = parser.parse_args(argv)
+    if args.smoke_test and (args.hardware_bench or args.usb or args.team_usb):
+        parser.error("Smoke tests only run in simulation.")
+    mode = "bench" if args.hardware_bench or args.usb or args.team_usb else "simulation"
+    directory = args.data_dir or Path(os.environ.get("LOCALAPPDATA", str(Path.home() / ".local/share"))) / "EPICS-Pharm" / mode
+    directory.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(filename=directory / "application.log", level=logging.INFO)
+    hardware = HttpHardware(os.environ.get("MAS_API_URL", ""), os.environ.get("MAS_API_KEY", ""),
+                            os.environ.get("MAS_CA_FILE")) if args.hardware_bench else Simulator()
+    use_native_resolution()
+    T.use_palette(startup_palette(directory))
+    root = tk.Tk()
+    T.apply_theme(root)
+    root.title("Pharmacy Drawer")
+    set_window_icon(root)
+    size_window(root)
+    if args.usb or args.team_usb:
+        root.withdraw()
+        port = choose_usb_port(root)
+        if port is None:
+            root.destroy()
+            return
+        hardware = TeamSerialHardware(port) if args.team_usb else SerialHardware(port)
+        root.deiconify()
+    catalog_path = args.catalog or saved_catalog_path(directory, ROOT / "UI/db.json.xz")
+    catalog = load_catalog(root, catalog_path)
+    if catalog is None:
+        hardware.close()
+        return
+    app = App(root, Store(directory / "inventory.sqlite3"), catalog, hardware)
+    if args.smoke_test:
+        root.update()
+        app.home()
+        root.update()
+        app.loading(1)
+        root.update()
+        app.executor.shutdown(wait=False)
+        hardware.close()
+        root.destroy()
+        print("Password-free four-drawer dashboard and loading form rendered successfully.")
+        return
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:
+        if sys.stderr is None:  # Windowless launch: no console would show the error.
+            from tkinter import messagebox
+            messagebox.showerror("Pharmacy Drawer could not start", f"{exc}\n\nSee app/docs/RUNNING.md.")
+        raise

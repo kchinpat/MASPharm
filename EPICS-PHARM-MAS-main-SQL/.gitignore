@@ -8,8 +8,8 @@ __pycache__/
 *.log
 demo-ui/
 .test-output/
-UI/db.json
-rpi_folder_copy/secure/*.env
 .merge-backup/
+app/rpi_folder_copy/secure/*.env
 
-/EPICS-PHARM-MAS-main-SQL.zip
+# The full 246 MB FDA export. The app uses app/UI/db.json.xz, built from it by app/tools/build_catalog.py.
+app/UI/db.json

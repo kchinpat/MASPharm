@@ -1,2 +1,0 @@
-# Direct laptop-to-Arduino Uno/Nano USB connection. Simulation needs no third-party packages.
-pyserial==3.5

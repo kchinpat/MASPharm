@@ -1,0 +1,8 @@
+# Desktop simulation uses only the Python 3.10+ standard library, including Tcl/Tk.
+# runtime-dependencies.zip already supplies Flask (browser UI) and pyserial (USB bench),
+# so nothing here is required. Install these only to use your own copies instead:
+Flask==3.1.2
+pyserial==3.5
+# Optional: JPEG label photos on the desktop. Browser photos need no imaging library.
+Pillow>=10.4,<13
+# Raspberry Pi API dependencies are pinned in rpi_folder_copy/requirements.txt.

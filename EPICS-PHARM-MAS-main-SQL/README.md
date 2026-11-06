@@ -51,3 +51,7 @@ Inventory uses SQLite with pending operations, reconciliation, an audit trail, c
 - [Combined-version workflows and launch options](app/docs/COMBINED_VERSION.md)
 - [Hardware requirements](app/docs/HARDWARE_REQUIREMENTS.md)
 - [Software changes and verification](app/docs/SOFTWARE_FIXES.md)
+
+## History
+
+This repository previously also held the original Tkinter prototype (`EPICS-PHARM-MAS-main/`), its review README and a Word user guide. They were replaced by this version and remain available in the git history.

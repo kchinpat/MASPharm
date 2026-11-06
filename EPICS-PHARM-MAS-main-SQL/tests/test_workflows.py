@@ -168,6 +168,32 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(2, self.app.store.compartments()[0]["quantity"])
         self.assertIsNone(self.app.store.active())
 
+    def test_unlock_without_reason_saves_count_without_extra_prompts(self):
+        self.messages.askinteger.side_effect = [1, 6]
+        self.messages.askstring.return_value = ""
+        self.app.manual()
+        self.assertEqual(6, self.app.store.compartments()[0]["quantity"])
+        self.assertIsNone(self.app.store.active())
+        self.assertIsNone(self.app.hardware.selected)
+        self.messages.askstring.assert_called_once()
+        self.assertIn("Optional", self.messages.askstring.call_args.args[1])
+        self.messages.askyesno.assert_not_called()
+        self.messages.showwarning.assert_not_called()
+
+    def test_cancelling_unlock_reason_does_not_open_drawer(self):
+        self.messages.askinteger.return_value = 1
+        self.messages.askstring.return_value = None
+        self.app.manual()
+        self.assertIsNone(self.app.store.active())
+        self.assertIsNone(self.app.hardware.selected)
+
+    def test_cancelling_manual_count_keeps_operation_available(self):
+        self.messages.askinteger.side_effect = [1, None]
+        self.messages.askstring.return_value = ""
+        self.app.manual()
+        self.assertEqual("manual", self.app.store.active()["kind"])
+        self.assertEqual(3, self.app.store.compartments()[0]["quantity"])
+
     def test_interrupted_verified_dispense_finishes_without_count(self):
         op = self.app.store.begin("dispense", 1, 1, {}, "admin")
         self.app.store.access(op, "admin")

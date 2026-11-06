@@ -163,16 +163,28 @@ class InventoryTests(unittest.TestCase):
             self.store.reconcile(op, 1, "staff", "Counted", closed=True)
         self.store.reconcile(op, 1, "admin", "Counted", closed=True)
 
-    def test_manual_requires_reason_and_reconciliation(self):
-        with self.assertRaises(ValueError):
-            self.store.begin("manual", 1, 0, {}, "admin")
-        op = self.store.begin("manual", 1, 0, {}, "admin", "Inspect empty compartment")
+    def test_manual_reason_optional_but_unknown_stock_still_needs_identification(self):
+        op = self.store.begin("manual", 1, 0, {}, "admin")
         self.store.access(op, "admin")
         with self.assertRaises(ValueError):
             self.store.finish(op, "admin", closed=True)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "no recorded product"):
             self.store.reconcile(op, 1, "admin", "Unknown stock", closed=True)
+        self.assertEqual(0, self.store.compartments()[0]["quantity"])
+        self.assertIsNotNone(self.store.active())
         self.store.reconcile(op, 0, "admin", "Empty and secured", closed=True)
+
+    def test_manual_count_replaces_known_quantity_in_both_directions(self):
+        self.load(3)
+        for count in (7, 2, 0):
+            with self.subTest(count=count):
+                op = self.store.begin("manual", 1, 0, {}, "admin")
+                self.store.access(op, "admin")
+                self.store.reconcile(op, count, "admin", "", closed=True)
+                drawer = Store(self.path).compartments()[0]
+                self.assertEqual(count, drawer["quantity"])
+                self.assertEqual(count, len(drawer["items"]))
+                self.assertIsNone(self.store.active())
 
     def test_reconcile_reason_is_optional(self):
         op = self.store.begin("manual", 1, 0, {}, "admin", "Inspect empty compartment")

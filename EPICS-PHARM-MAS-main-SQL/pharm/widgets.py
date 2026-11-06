@@ -8,15 +8,16 @@ import zlib
 from UI import theme as T
 
 
-def label(parent, text="", font="body", fg=T.TEXT, bg=T.SURFACE, **options):
+def label(parent, text="", font="body", fg=None, bg=None, **options):
     theme = T.apply_theme(parent)
     options.setdefault("anchor", "w")
     options.setdefault("justify", "left")
-    return tk.Label(parent, text=text, font=theme.font(font), fg=fg, bg=bg, **options)
+    return tk.Label(parent, text=text, font=theme.font(font), fg=T.TEXT if fg is None else fg,
+                    bg=T.SURFACE if bg is None else bg, **options)
 
 
-def divider(parent, color=T.BORDER):
-    return tk.Frame(parent, height=1, bg=color)
+def divider(parent, color=None):
+    return tk.Frame(parent, height=1, bg=T.BORDER if color is None else color)
 
 
 def icon_png(size, layers):
@@ -51,7 +52,7 @@ def set_window_icon(root):
     theme = T.apply_theme(root)
     icons = []
     for size in (16, 32, 48, 64):
-        layers = [(T.rounded((0, 0, size, size), size * 0.24), T.ACCENT)]
+        layers = [(T.rounded((0, 0, size, size), size * 0.24), T.BRAND)]
         pad, gap = size * 0.2, size * 0.06
         height = (size - 2 * pad - 3 * gap) / 4
         for index in range(4):
@@ -71,7 +72,8 @@ class ScrollFrame(tk.Frame):
     always re-measure. The scrollbar gutter is reserved, which avoids the
     reflow loop that auto-hiding scrollbars cause."""
 
-    def __init__(self, parent, bg=T.SURFACE):
+    def __init__(self, parent, bg=None):
+        bg = T.SURFACE if bg is None else bg
         super().__init__(parent, bg=bg)
         theme = T.apply_theme(self)
         self.canvas = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0, yscrollincrement=theme.px(24))
@@ -144,7 +146,7 @@ class Progress(tk.Frame):
         body = tk.Frame(self, bg=T.SURFACE, padx=px(44), pady=px(40))
         body.pack(fill="x")
         caption = f"{context}  ·  Please wait" if context else "Please wait"
-        label(body, caption.upper(), "caption", T.ACCENT_DARK).pack(anchor="w")
+        label(body, caption.upper(), "caption", T.CAPTION).pack(anchor="w")
         label(body, title, "display", wraplength=px(600)).pack(anchor="w", pady=(px(8), 0))
         self.thickness, self.longest = px(10), px(600)
         self.bar = tk.Canvas(body, height=self.thickness, bg=T.SURFACE, highlightthickness=0, bd=0)

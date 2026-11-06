@@ -1,11 +1,20 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-ui="two" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pharmacy Drawer</title>
 <link rel="stylesheet" href="/cabinet.css">
-<script>try { if (localStorage.getItem("pharm-theme") === "dark") document.documentElement.dataset.theme = "dark"; } catch (e) {}</script>
+<script>
+// UI two unless the legacy UI was chosen. Each UI remembers its own theme:
+// UI two is dark unless light was chosen, and the legacy UI light unless dark was.
+function savedTheme(two) {
+  try { const theme = localStorage.getItem(two ? "pharm-ui-two-theme" : "pharm-theme"); if (theme === "light" || theme === "dark") return theme; } catch (e) {}
+  return two ? "dark" : "light";
+}
+try { if (localStorage.getItem("pharm-ui") === "one") delete document.documentElement.dataset.ui; } catch (e) {}
+document.documentElement.dataset.theme = savedTheme(document.documentElement.dataset.ui === "two");
+</script>
 </head>
 <body>
 <header class="topbar">
@@ -13,7 +22,7 @@
     <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true"><rect width="34" height="34" rx="8" style="fill: var(--logo-tile)"/><g style="fill: var(--logo-mark)"><rect x="7" y="7" width="20" height="3.9" rx="1.2"/><rect x="7" y="12.4" width="20" height="3.9" rx="1.2"/><rect x="7" y="17.8" width="20" height="3.9" rx="1.2"/><rect x="7" y="23.2" width="20" height="3.9" rx="1.2"/></g></svg>
     <span class="brand-name">Pharmacy Drawer</span>
   </div>
-  <input class="scan-top" id="rx" autocomplete="off" placeholder="Scan a package to dispense" aria-label="Scan a package to dispense">
+  <label class="scan-field"><span class="scan-tag">Scan</span><input class="scan-top" id="rx" autocomplete="off" placeholder="Scan a package to dispense or load" aria-label="Scan a package to dispense or load"></label>
   <span class="mode" id="mode">Loading</span>
   <details class="menu" id="main-menu">
     <summary>Menu</summary>
@@ -24,19 +33,21 @@
       <a href="/api/audit" download>Export audit</a>
       <a href="/api/backup" download>Backup</a>
       <hr>
-      <button id="theme-button">Dark theme</button>
+      <button id="theme-button">Light theme</button>
+      <button id="ui-button">Switch to legacy UI</button>
     </div>
   </details>
   <input type="file" id="catalog-file" accept=".json,application/json" hidden>
 </header>
 
-<main class="shell">
+<main class="shell" id="shell">
   <nav class="cabinet" id="drawers" aria-label="Drawers"></nav>
   <section class="panel" id="panel">
+    <button class="link panel-close" id="panel-close" hidden>Close</button>
     <div class="view" id="view"></div>
     <div class="view hidden" id="load-view">
       <p class="caption" id="load-caption">Load</p>
-      <h2>Scan the package</h2>
+      <h2 id="load-title">Scan the package</h2>
       <p class="note" id="load-current"></p>
       <div class="scan-row"><input class="scan" id="load-scan" autocomplete="off" aria-label="Package barcode"><button id="lookup-button">Look up</button></div>
       <p class="notice" id="lookup-notice"></p>
@@ -49,11 +60,13 @@
       </div></div>
     </div>
     <section class="prompt hidden" id="prompt" role="dialog" aria-modal="true" aria-labelledby="dialog-text">
+      <div class="prompt-head" id="prompt-head" hidden></div>
       <p class="caption" id="dialog-title"></p>
       <h2 id="dialog-text"></h2>
       <div id="dialog-extra"></div>
       <input id="dialog-input" autocomplete="off" hidden>
-      <div class="buttons"><button class="primary large" id="dialog-ok">Continue</button><button class="large" id="dialog-cancel">Cancel</button></div>
+      <div class="prompt-side" id="prompt-side" hidden></div>
+      <div class="buttons"><button class="primary large" id="dialog-ok">Continue</button><button class="large" id="dialog-reopen" hidden>Reopen drawer</button><button class="large" id="dialog-cancel">Cancel</button></div>
     </section>
     <section class="progress hidden" id="progress" tabindex="-1" aria-labelledby="progress-title">
       <p class="caption" id="progress-caption"></p>
@@ -64,6 +77,10 @@
     <p id="message" role="status" aria-live="polite"></p>
   </section>
 </main>
+<footer class="log" id="log" hidden>
+  <div class="log-head"><h2>Recent activity</h2><a href="/api/audit" download>Export audit</a></div>
+  <div class="log-rows" id="log-rows"></div>
+</footer>
 <script>
 "use strict";
 const token = "__PHARM_TOKEN__";
@@ -74,12 +91,15 @@ const optional = new Set(["description","brand_name","labeler_name"]);
 const wide = new Set(["generic_name","description"]);
 let state = null, operation = null, prepared = null, working = false;
 let selected = 1, view = "drawer", loadDrawer = 1, context = "", promptOpen = false;
+let detail = false, flow = false, shownColumns = "";  // UI two: More is open; a guided step is on screen until its run ends
+const two = () => document.documentElement.dataset.ui === "two";
 const moreFields = document.createElement("details");
 moreFields.className = "more-fields";
 moreFields.innerHTML = '<summary>More details</summary><div class="fields"></div>';
 for (const [key,label] of Object.entries(labels)) {
   const field = document.createElement("label");
   field.classList.toggle("wide", wide.has(key));
+  field.dataset.field = key;
   field.textContent = label;
   const input = document.createElement("input"); input.id = "field-" + key;
   if (key === "expiry_date") input.type = "date";
@@ -87,14 +107,22 @@ for (const [key,label] of Object.entries(labels)) {
   (optional.has(key) ? moreFields.querySelector(".fields") : $("fields")).append(field);
 }
 $("fields").append(moreFields);
+// Shown in UI two's load form for checking against the label. They are not product fields, so never saved from here.
+for (const [key,label] of [["strength","Strength"],["serial","Serial"]]) {
+  const field = document.createElement("label");
+  field.className = "console-only"; field.dataset.field = key; field.textContent = label;
+  const input = document.createElement("input"); input.id = "show-" + key; input.readOnly = true;
+  field.append(input); $("fields").append(field);
+}
 function localToday() { const now = new Date(); return new Date(now - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10); }
 function plural(unit, count) {
   unit = String(unit || "").trim();
   if (count === 1 || !/^[a-z]+( [a-z]+)*$/.test(unit) || unit.endsWith("s")) return unit;
   return unit + (/(x|ch|sh)$/.test(unit) ? "es" : "s");
 }
+function daysLeft(expiry) { return Math.round((new Date(expiry + "T00:00") - new Date(localToday() + "T00:00")) / 86400000); }
 function expiryNote(expiry) {
-  const days = Math.round((new Date(expiry + "T00:00") - new Date(localToday() + "T00:00")) / 86400000);
+  const days = daysLeft(expiry);
   if (days < 0) return ["Expired", true];
   if (days === 0) return ["Expires today", true];
   if (days <= 31) return [`Expires in ${days} day${days === 1 ? "" : "s"}`, true];
@@ -111,13 +139,15 @@ async function run(action) {
   working = true; paintBusy();
   try { await action(); }
   catch (error) { $("message").textContent = error.message; }
-  finally { try { await refresh(); } catch(error) { $("message").textContent=error.message; } finally { working=false; paintBusy(); } }
+  finally { flow=false; try { await refresh(); } catch(error) { $("message").textContent=error.message; } finally { working=false; paintBusy(); scanReady(); } }
 }
+// A barcode scanner types wherever the focus is, so a drawer screen keeps it in the top bar.
+function scanReady() { if (view === "drawer" && !promptOpen) $("rx").focus(); }
 // One guided step at a time, shown over the work panel.
 function ask(title, text, type=null, initial="", extra="", options={}) {
   return new Promise(resolve => {
     const prompt = $("prompt");
-    promptOpen = true;
+    promptOpen = true; flow = true;
     prompt.className = "prompt" + (options.tone ? " " + options.tone : "");
     $("dialog-title").textContent = (context ? context + "  ·  " : "") + title;
     $("dialog-text").textContent = text;
@@ -128,7 +158,10 @@ function ask(title, text, type=null, initial="", extra="", options={}) {
     const input = $("dialog-input"); input.hidden = !type; input.type = type || "text"; input.value = initial;
     const finish = okay => { prompt.classList.add("hidden"); promptOpen = false; paintBusy(); resolve(okay ? (type ? input.value : true) : null); };
     $("dialog-ok").onclick = () => finish(true); $("dialog-cancel").onclick = () => finish(false);
-    prompt.onkeydown = event => { if (event.key === "Escape" && !options.noCancel) { event.preventDefault(); finish(false); } };
+    $("dialog-reopen").hidden = !(two() && options.reopen);
+    $("dialog-reopen").onclick = () => { input.value = ""; finish(true); };  // an empty scan requests reopening
+    paintPrompt(options);
+    prompt.onkeydown =event => { if (event.key === "Escape" && !options.noCancel) { event.preventDefault(); finish(false); } };
     input.onkeydown = event => { if (event.key === "Enter") { event.preventDefault(); finish(true); } };
     paintBusy();
     if (type) { input.focus(); input.select(); } else $("dialog-ok").focus();
@@ -142,6 +175,7 @@ function timeLeft(seconds) { const s = Math.max(1, Math.ceil(seconds)); return `
 async function step(title, kind, request) {
   const expected = Math.max(stepSeconds, estimates[kind] ?? (state?.simulation ? 0 : 3));
   const cover = $("progress"), bar = cover.querySelector(".bar"), focused = document.activeElement;
+  flow = true; paintBusy();
   $("progress-caption").textContent = (context ? context + "  ·  " : "") + "Please wait";
   $("progress-title").textContent = title;
   for (const id of ["view", "load-view"]) $(id).inert = true;
@@ -176,6 +210,7 @@ async function step(title, kind, request) {
   }
 }
 function paintBusy() {
+  if (two() && state) paintConsole();
   const active = !!state?.active;
   for(const id of ["manual-button","catalog-button"]) $(id).disabled = working || active;
   for(const id of ["status-button","lookup-button","load-box","load-done","load-cancel"]) $(id).disabled = working;
@@ -203,11 +238,11 @@ function drawerView() {
       ${recorded.generic_name?`<p class="note">Recorded: ${esc(recorded.generic_name)} · lot ${esc(recorded.lot)}</p>`:""}
       <div class="actions"><div class="row"><button class="warning large" data-action="reconcile">Count drawer ${d.id}</button></div></div>`;
   }
-  if (!d.quantity) return `<p class="caption">Drawer ${d.id}</p><h2 class="empty">Empty</h2><p class="note lead">Nothing is in this drawer. Load it before dispensing.</p>${blocked}
+  if (!d.quantity) return `<p class="caption">Drawer ${d.id}</p><h2 class="empty">Empty</h2><p class="note lead">Nothing is in this drawer. Scan a package to load it.</p>${blocked}
       <div class="actions"><div class="row"><button class="primary large" disabled>Dispense</button><button class="large" data-action="load">Load drawer ${d.id}</button></div></div>`;
   const lots = [...new Set(d.items.map(i=>i.product.lot))];
   const [note, urgent] = expiryNote(p.expiry_date);
-  const maker = [p.brand_name, p.labeler_name].filter(Boolean).join(" · ");
+  const maker = [two() ? d.strength : "", p.brand_name, p.labeler_name].filter(Boolean).join(" · ");
   const photo = d.photo
     ? `<button class="photo" data-action="photo" aria-label="Enlarge the package label photo"><img src="${esc(d.photo)}" alt="Package label for ${esc(p.generic_name)}"></button>`
     : d.photo_status === "loading" ? `<p class="photo-empty">Downloading the label photo...</p>`
@@ -220,8 +255,72 @@ function drawerView() {
     <div class="actions"><div class="row"><button class="primary large" data-action="dispense">Dispense</button><button class="large" data-action="load">Load more</button></div>
       <div class="links"><button class="link" data-action="unload">Unload drawer</button><button class="link" data-action="records">Box records</button></div></div>`;
 }
+// UI two: a drawer's column, with everything about it in view and its actions on it.
+function channel(d) {
+  const p = d.product;
+  if (!d.quantity) return `<section class="channel idle" style="order:${d.id}" aria-label="Drawer ${d.id}"><div class="channel-top"><span class="num">${d.id}</span></div>
+    <div class="who"><h2>Empty</h2></div><div class="stock"><b>0</b></div>
+    <div class="channel-actions"><button data-action="load" data-drawer="${d.id}">Load drawer ${d.id}</button></div></section>`;
+  const days = daysLeft(p.expiry_date), urgent = days <= 31, open = state.open_mode.includes(d.id);
+  const tag = open ? '<span class="tag active">Open</span>' : days < 0 ? '<span class="tag">Expired</span>' : urgent ? '<span class="tag">Expires soon</span>' : "";
+  const maker = [d.strength, p.labeler_name].filter(Boolean).join(" · ");
+  const lots = [...new Set(d.items.map(i=>i.product.lot))];
+  return `<section class="channel${urgent?" attention":""}" style="order:${d.id}" aria-label="Drawer ${d.id}"><div class="channel-top"><span class="num">${d.id}</span>${tag}</div>
+    <div class="who"><h2>${esc(p.generic_name)}</h2>${maker?`<p>${esc(maker)}</p>`:""}</div>
+    <div class="stock"><b>${d.quantity}</b><span>${esc(plural(p.unit, d.quantity))}</span></div>
+    <div class="life${urgent?" urgent":""}"><div><span>Expires</span><b>${esc(p.expiry_date)}</b></div>
+      <div class="gauge" aria-hidden="true"><span style="width:${Math.max(0, Math.min(100, days / 3.65))}%"></span><i></i></div><p>${esc(daysNote(days))}</p></div>
+    <dl><dt>${lots.length>1?"Lots":"Lot"}</dt><dd>${esc((lots.length?lots:[p.lot]).join(", "))}</dd><dt>Package</dt><dd>${esc(p.ndc)}</dd></dl>
+    <div class="channel-actions"><button class="primary" data-action="dispense" data-drawer="${d.id}">Dispense</button><button data-action="load" data-drawer="${d.id}">Load</button><button data-action="more" data-drawer="${d.id}">More</button></div></section>`;
+}
+function daysNote(days) { return days < 0 ? "Expired" : days === 0 ? "Expires today" : `${days} day${days === 1 ? "" : "s"} left`; }
+// UI two: a narrow column for each other drawer while one is being worked on.
+function tile(d) {
+  const filled = d.quantity > 0, days = filled ? daysLeft(d.product.expiry_date) : Infinity;
+  const held = flow || view === "load" || !!state.active;
+  return `<button class="tile" style="order:${d.id}" data-select="${d.id}"><span class="num">${d.id}</span><span class="name">${filled?esc(d.product.generic_name):"Empty"}</span><b>${d.quantity}</b>${days<=31?`<span class="soon">${esc(daysNote(days))}</span>`:""}${held?'<span class="held">Held</span>':""}</button>`;
+}
+function contextDrawer() { return Number(context.match(/\d+/)?.[0]); }
+function focusDrawer() {
+  if (view === "load") return loadDrawer;
+  if (flow) return state.drawers[contextDrawer()-1] ? contextDrawer() : 5;  // 5: after all four, for a step about no one drawer
+  return state.active || detail ? selected : 0;
+}
+// UI two: the drawers are equal columns until one is being worked on. That
+// drawer's column then widens to hold the panel, and the others narrow.
+function paintConsole() {
+  const focus = focusDrawer();
+  $("shell").dataset.focus = focus;
+  $("shell").dataset.tone = state.active && !operation ? "warn" : flow || view === "load" ? "active" : "";
+  $("panel").style.order = focus;
+  const columns = state.drawers.filter(d=>d.id!==focus).map(focus?tile:channel).join("");
+  if (columns !== shownColumns) $("drawers").innerHTML = shownColumns = columns;  // a rebuild under the pointer would lose a click
+  $("panel-close").hidden = !detail || flow || view !== "drawer" || !!state.active;
+  $("rx").placeholder = promptOpen ? $("dialog-title").textContent : flow ? "Please wait" : view === "load" ? $("load-caption").textContent
+    : state.active ? `Drawer ${state.active.compartment} needs a count` : "Ready for a package";
+  $("log-rows").innerHTML = (state.activity||[]).map(a=>`<div${a.attention?' class="attention"':""}><span>${esc(a.when)}</span><span>${esc(a.text)}</span></div>`).join("")
+    || '<div><span>Nothing yet</span></div>';
+}
+// UI two: a guided step names its drawer, and keeps the label and stock details beside it.
+function paintPrompt(options) {
+  const d = state?.drawers[contextDrawer()-1], on = two() && !!d;
+  $("prompt-head").hidden = !on;
+  $("prompt-side").hidden = !(on && options.side);
+  if (!on) return;
+  const p = d.product, maker = [d.strength, p.labeler_name].filter(Boolean).join(" · ");
+  $("prompt-head").innerHTML = `<div class="prompt-top"><span class="num">${d.id}</span>${options.open?'<span class="tag active">Open</span>':""}</div>${p.generic_name?`<h3>${esc(p.generic_name)}</h3>${maker?`<p>${esc(maker)}</p>`:""}`:""}`;
+  if (options.side) $("prompt-side").innerHTML = `${d.photo?`<img src="${esc(d.photo)}" alt="Package label for ${esc(p.generic_name)}">`:""}
+    <dl><dt>Lot</dt><dd>${esc(p.lot)}</dd><dt>Package</dt><dd>${esc(p.ndc)}</dd><dt>Expires</dt><dd class="${daysLeft(p.expiry_date)<=31?"urgent":""}">${esc(p.expiry_date)}</dd></dl>`;
+}
+function dispenseSteps(done, count) {
+  const rows = Array.from({length:count}, (_, i) => {
+    const row = done[i], tone = row ? "" : i === done.length ? "now" : "later";
+    return `<div class="${tone}"><span>${i+1}</span><b>${row?"Verified":i===done.length?"Scan now":"Waiting"}</b><span>${esc(row?.serial)}</span><span>${esc(row?.time)}</span></div>`;
+  });
+  return `<div class="steps">${rows.join("")}</div>`;
+}
 function render() {
-  $("drawers").innerHTML = state.drawers.map(front).join("");
+  if (!two()) $("drawers").innerHTML = state.drawers.map(front).join("");
   $("view").classList.toggle("hidden", view !== "drawer");
   $("load-view").classList.toggle("hidden", view !== "load");
   if (view === "drawer") $("view").innerHTML = drawerView();
@@ -240,12 +339,18 @@ async function refresh() {
 }
 function select(number) {
   if (working || promptOpen || operation) return;
-  selected = number; view = "drawer"; render();
+  selected = number; view = "drawer"; render(); scanReady();
+}
+function paintLoadTitle() {
+  $("load-title").textContent=two()?`Load drawer ${loadDrawer}`:"Scan the package";
+  $("load-title").dataset.num=loadDrawer;
 }
 function showLoad(number) {
   prepared=null; operation=null; loadDrawer=number; selected=number; view="load";
   const product=state.drawers[number-1].product;
   $("load-caption").textContent=`Load · Drawer ${number}`;
+  paintLoadTitle();
+  $("show-strength").value=state.drawers[number-1].strength; $("show-serial").value="";
   $("load-current").textContent=product.generic_name?`Holds ${product.generic_name}. New boxes must be the same package.`:"";
   $("load-scan").value=""; $("load-box").textContent="Confirm and load box";
   for(const key of Object.keys(labels)) $("field-"+key).value=product[key]||(key==="unit"?"box":"");
@@ -266,6 +371,26 @@ async function lookup() {
   for(const key of Object.keys(labels)) $("field-"+key).value=prepared.product[key]||"";
   $("lookup-notice").textContent=prepared.notice;
   $("serial").textContent=prepared.scan.serial?`Serial ${prepared.scan.serial}`:"";
+  $("show-strength").value=prepared.strength; $("show-serial").value=prepared.scan.serial||"";
+}
+// Open the selected drawer's load form filled in from a scan no drawer holds.
+// A stocked drawer only takes more of what it holds, so it is not offered.
+async function loadScan(scan) {
+  if(two()&&state.drawers[selected-1].quantity) selected=state.drawers.find(d=>!d.quantity)?.id??selected;  // no drawer is selected on its home screen
+  const held=state.drawers[selected-1].product;
+  if(held.generic_name) throw new Error(`That package is not in any drawer. Drawer ${selected} holds ${held.generic_name}, so select an empty drawer to load it.`);
+  showLoad(selected);
+  $("load-scan").value=scan;
+  await lookup();
+}
+async function scanPackage() {
+  const scan=$("rx").value.trim(); $("rx").value="";
+  if(!scan) return;
+  const match=await api("/api/find",{scan});
+  if(!match.drawers.length) return loadScan(scan);
+  let number=match.drawers[0];
+  if(match.drawers.length>1){context="";const text=await ask("Choose a drawer",`This package is in drawers ${match.drawers.join(", ")}. Which one?`,"number",String(number));if(text===null)return;number=Number(text);if(!match.drawers.includes(number))throw new Error("Choose a matching drawer.");}
+  selected=number;view="drawer";render();await dispense(number);
 }
 async function loadBox() {
   context = `Drawer ${loadDrawer}`;
@@ -291,15 +416,18 @@ async function complete(op) {
 async function dispense(number) {
   context = `Drawer ${number}`;
   const drawer=state.drawers[number-1];
-  const text=await ask("Dispense",`How many ${plural(drawer.product.unit, 2)} of ${drawer.product.generic_name}? ${drawer.quantity} in the drawer.`,"number","1");
+  const text=await ask("Dispense",`How many ${plural(drawer.product.unit, 2)} of ${drawer.product.generic_name}? ${drawer.quantity} in the drawer.`,"number","1","",{side:true});
   if(text===null) return;
   const count=Number(text); if(!Number.isInteger(count)||count<1) throw new Error("Enter a positive whole number.");
   let op=(await step(`Unlocking drawer ${number}`,"open",()=>api("/api/start",{kind:"dispense",drawer:number,count}))).operation;
+  const done=[];
   for(let index=0;index<count;index++) {
-    const scan=await ask("Verify each box",`Scan box ${index+1} of ${count} as you remove it. If access has timed out, submit an empty scan to request reopening.`,"text","","",{ok:"Submit scan"});
+    const line=two()?`Scan ${drawer.product.unit} ${index+1} of ${count}`:`Scan box ${index+1} of ${count} as you remove it. If access has timed out, submit an empty scan to request reopening.`;
+    const scan=await ask("Verify each box",line,"text","",two()?dispenseSteps(done,count):"",{ok:"Submit scan",side:true,open:true,reopen:true});
     if(scan===null) return cancelOperation(op.id,"Cancelled after drawer access");
     if(scan.trim()==="") { await step(`Unlocking drawer ${number}`,"open",()=>api("/api/reopen",{operation:op.id})); index--; continue; }
-    op=(await api("/api/verify",{operation:op.id,scan})).operation;
+    const verified=await api("/api/verify",{operation:op.id,scan});
+    op=verified.operation; done.push({serial:verified.serial,time:new Date().toLocaleTimeString([], {hour12:false})});
   }
   await complete(op);
 }
@@ -308,7 +436,7 @@ async function unload(number) {
   if(!await ask("Unload drawer",`Remove all stock from drawer ${number}?`,null,"","",{ok:"Unload drawer",danger:true,tone:"warn"})) return;
   const op=(await step(`Unlocking drawer ${number}`,"open",()=>api("/api/start",{kind:"unload",drawer:number}))).operation;
   // Nothing senses when the drawer is empty and closed; locking sooner would end the release.
-  if(!await ask(`Drawer ${number} is open`,"Remove everything, close the drawer, then choose Done.",null,"","",{ok:"Done"})) return cancelOperation(op.id,`Cancelled while drawer ${number} was open`);
+  if(!await ask(`Drawer ${number} is open`,"Remove everything, close the drawer, then choose Done.",null,"","",{ok:"Done",open:true})) return cancelOperation(op.id,`Cancelled while drawer ${number} was open`);
   await complete(op);
 }
 function showRecords(number) {
@@ -327,10 +455,10 @@ async function manual() {
   context = "";
   const text=await ask("Unlock a drawer","Which drawer? (1 to 4)","number","1"); if(text===null) return;
   context = `Drawer ${text}`;
-  const reason=await ask("Unlock a drawer","Why does it need to be opened?","text"); if(reason===null) return;
-  const op=(await step(`Unlocking drawer ${text}`,"open",()=>api("/api/start",{kind:"manual",drawer:Number(text),reason}))).operation;
-  await ask("Drawer open",`Drawer ${op.compartment} is open. When you're done, count what is in it.`,null,"","",{ok:"Done",noCancel:true});
-  await cancelOperation(op.id,"Manual inspection requires a physical count");
+  const reason=await ask("Unlock a drawer","Why does it need to be opened? (Optional)","text"); if(reason===null) return;
+  await step(`Unlocking drawer ${text}`,"open",()=>api("/api/start",{kind:"manual",drawer:Number(text),reason}));
+  await refresh();
+  await reconcile();
 }
 async function reconcile() {
   const op=state.active;
@@ -340,44 +468,72 @@ async function reconcile() {
   let count, ids;
   if(tracked) {
     const list=`<div class="box-list">${records.map(i=>`<label><input type="checkbox" class="remaining-box" value="${esc(i.id)}"> Lot ${esc(i.product.lot)} · ${esc(i.product.expiry_date)} · Serial ${esc(i.serial||"not recorded")}</label>`).join("")}</div>`;
-    const okay=await ask("Count drawer","Tick each box that is physically in the drawer. Remove anything else.",null,"",list);
+    const okay=await ask("Count drawer","When finished, tick each box still in the drawer and close it before saving.",null,"",list,{ok:"Save count",open:op.kind==="manual"});
     if(!okay) return;
     ids=Array.from(document.querySelectorAll(".remaining-box:checked"),e=>e.value); count=ids.length;
   } else {
-    const text=await ask("Count drawer","How many of the recorded product and lot are physically in the drawer? Remove anything else first.","number","0"); if(text===null) return;
-    count=Number(text); if(!Number.isInteger(count)||count<0) throw new Error("Enter a nonnegative whole number.");
+    const text=await ask("Count drawer","How many of the recorded product and lot are physically in the drawer? When finished, close the drawer and save this count.","number","","",{ok:"Save count",open:op.kind==="manual"}); if(text===null) return;
+    count=Number(text); if(!text.trim()||!Number.isInteger(count)||count<0) throw new Error("Enter a nonnegative whole number.");
   }
-  const reason=await ask("Count drawer","What happened? This is recorded in the audit log. (Optional)","text"); if(reason===null) return;
-  const data={operation:op.id,count,reason,closed:true}; if(ids) data.remaining_ids=ids;
+  const data={operation:op.id,count,closed:true}; if(ids) data.remaining_ids=ids;
   const result=await step("Saving the count and locking the drawers","lock",()=>api("/api/reconcile",data)); operation=null; view="drawer"; $("message").textContent="Count saved."+(result.lock_ok?"":" Lock request failed: "+result.lock_message);
 }
 document.addEventListener("click", event => {
   for (const menu of document.querySelectorAll("details.menu[open]")) if (!menu.contains(event.target)) menu.removeAttribute("open");
   const pick = event.target.closest("[data-select]");
   if (pick) return select(Number(pick.dataset.select));
-  const button = event.target.closest("#view button[data-action]");
+  const button = event.target.closest("#view button[data-action], #drawers button[data-action]");
   if (!button) return;
+  if (button.dataset.drawer) selected = Number(button.dataset.drawer);
   const number = selected, action = button.dataset.action;
+  if (action === "more") { detail = true; return render(); }
   if (action === "load") return showLoad(number);
   run(() => action === "dispense" ? dispense(number) : action === "unload" ? unload(number)
     : action === "records" ? showRecords(number) : action === "reconcile" ? reconcile() : packagePhoto(number));
 });
 $("main-menu").addEventListener("click", event => { if (event.target.closest(".menu-list button, .menu-list a")) $("main-menu").removeAttribute("open"); });
 $("manual-button").onclick=()=>run(manual);
+// The theme applies to the UI showing, and each UI remembers its own (savedTheme, above).
 function showTheme() { $("theme-button").textContent = document.documentElement.dataset.theme === "dark" ? "Light theme" : "Dark theme"; }
 $("theme-button").onclick=()=>{
-  const dark = document.documentElement.dataset.theme !== "dark";
-  if (dark) document.documentElement.dataset.theme = "dark"; else delete document.documentElement.dataset.theme;
-  try { localStorage.setItem("pharm-theme", dark ? "dark" : "light"); } catch (e) {}
+  const theme = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = theme;
+  try { localStorage.setItem(two() ? "pharm-ui-two-theme" : "pharm-theme", theme); } catch (e) {}
   showTheme();
 };
 showTheme();
+// Both UIs share every workflow and this page's elements; the root's data-ui picks the layout.
+function showUi() {
+  $("ui-button").textContent = two() ? "Switch to legacy UI" : "Switch to new UI";
+  $("log").hidden = !two();
+  for (const key of optional) (two() ? $("fields") : moreFields.querySelector(".fields")).append($("field-" + key).parentElement);
+  $("rx").placeholder = $("rx").getAttribute("aria-label");
+  $("panel").style.order = "";
+  $("panel-close").hidden = true;
+  if (two()) $("shell").dataset.focus = 0; else delete $("shell").dataset.focus;
+  delete $("shell").dataset.tone;
+  shownColumns = "";
+  paintLoadTitle();
+  if (state) render();
+}
+$("ui-button").onclick=()=>{
+  const on = !two();
+  if (on) document.documentElement.dataset.ui = "two"; else delete document.documentElement.dataset.ui;
+  document.documentElement.dataset.theme = savedTheme(on);
+  try { localStorage.setItem("pharm-ui", on ? "two" : "one"); } catch (e) {}
+  detail = false;
+  showTheme();
+  showUi();
+  scanReady();
+};
+showUi();
+$("panel-close").onclick=()=>{ detail = false; render(); scanReady(); };
 $("lookup-button").onclick=()=>run(lookup);
 $("load-scan").onkeydown=event=>{if(event.key==="Enter") {event.preventDefault();run(lookup);}};
 $("load-box").onclick=()=>run(loadBox);
 $("load-done").onclick=()=>run(()=>complete(operation));
 $("load-cancel").onclick=()=>run(async()=>{if(operation) await cancelOperation(operation.id,"Loading cancelled after access"); view="drawer";});
-$("rx").onkeydown=event=>{if(event.key==="Enter") {event.preventDefault();run(async()=>{const match=await api("/api/find",{scan:$("rx").value});$("rx").value="";let number=match.drawers[0];if(match.drawers.length>1){context="";const text=await ask("Choose a drawer",`This package is in drawers ${match.drawers.join(", ")}. Which one?`,"number",String(number));if(text===null)return;number=Number(text);if(!match.drawers.includes(number))throw new Error("Choose a matching drawer.");}selected=number;view="drawer";render();await dispense(number);});}};
+$("rx").onkeydown=event=>{if(event.key==="Enter") {event.preventDefault();run(scanPackage);}};
 $("status-button").onclick=()=>run(async()=>{ context=""; $("message").textContent=(await step("Checking the cabinet","status",()=>api("/api/status"))).message; });
 $("catalog-button").onclick=()=>$("catalog-file").click();
 $("catalog-file").onchange=()=>run(async()=>{

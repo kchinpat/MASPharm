@@ -14,6 +14,8 @@ import webbrowser
 
 from flask import Flask, jsonify, request, send_file
 from werkzeug.exceptions import HTTPException
+from . import activity
+from .barcodes import read_scan
 from .catalog import Catalog, identifier
 from .hardware import Simulator, SerialHardware, HttpHardware
 from .team_hardware import TeamSerialHardware
@@ -105,12 +107,14 @@ def create_app(store, catalog, hardware):
             expiry = product.get("expiry_date")
             photo, photo_status = label_photo(product) if product else (None, None)
             result.append({**drawer, "expiring": bool(expiry and date.fromisoformat(expiry) <= today + timedelta(days=31)),
-                           "photo": photo, "photo_status": photo_status})
+                           "photo": photo, "photo_status": photo_status,
+                           "strength": service.catalog.strength(product["ndc"]) if product else ""})
         active = store.active()
         choices = store.reconciliation_items(active["id"]) if active else []
         return jsonify(ok=True, drawers=result, active=active, choices=choices, mode=hardware.mode,
                        open_mode=getattr(hardware, "open_drawers", [hardware.selected] if getattr(hardware, "selected", None) else []),
-                       simulation=isinstance(hardware, Simulator), catalog=service.catalog.warning)
+                       simulation=isinstance(hardware, Simulator), catalog=service.catalog.warning,
+                       activity=activity.recent(store, 3))
 
     @app.get("/api/status")
     def status():
@@ -123,7 +127,8 @@ def create_app(store, catalog, hardware):
 
     @app.post("/api/preview")
     def preview():
-        return jsonify(ok=True, **service.preview(body().get("scan", "")))
+        details = service.preview(body().get("scan", ""))
+        return jsonify(ok=True, strength=service.catalog.strength(details["product"].get("ndc")), **details)
 
     @app.post("/api/start")
     def start():
@@ -134,9 +139,8 @@ def create_app(store, catalog, hardware):
     @app.post("/api/find")
     def find():
         scan = body().get("scan", "")
+        read_scan(scan)
         matches = [d["id"] for d in store.compartments() if d["product"] and service.catalog.matches(scan, d["product"]["ndc"])]
-        if not matches:
-            raise ValueError("This package is not stored in any drawer.")
         return jsonify(ok=True, drawers=matches)
 
     @app.post("/api/secure")
@@ -147,7 +151,8 @@ def create_app(store, catalog, hardware):
     @app.post("/api/verify")
     def verify():
         data = body()
-        return jsonify(ok=True, operation=service.verify(data.get("operation"), data.get("scan", "")))
+        operation = service.verify(data.get("operation"), data.get("scan", ""))
+        return jsonify(ok=True, operation=operation, serial=read_scan(data.get("scan", ""))["serial"])
 
     @app.post("/api/reopen")
     def reopen():

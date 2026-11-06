@@ -12,7 +12,9 @@ from tkinter import ttk
 from UI import theme as T
 from .widgets import ScrollFrame, label
 
-_TONES = {"info": T.ACCENT_DARK, "warning": T.WARNING, "error": T.DANGER}
+
+def _tone_color(tone):
+    return {"warning": T.WARNING, "error": T.DANGER}.get(tone, T.CAPTION)
 
 
 class _Prompt:
@@ -21,14 +23,14 @@ class _Prompt:
         root = master.nametowidget(".")
         self.theme = theme = T.apply_theme(master)
         px = theme.px
-        self.master, self.result = master, None
+        self.master, self.result, self.title = master, None, title
         self.done = tk.BooleanVar(master, False)
         host = getattr(root, "pharm_prompt_host", None)
         self.host = host if host is not None and master is root and host.prompt_available() else None
         if self.host:
             self.top = None
             frame = self.host.prompt_begin(self)
-            pads = (px(44), px(40))
+            pads = (px(24), px(18)) if T.console() else (px(44), px(40))
         else:
             self.top = frame = tk.Toplevel(master)
             frame.withdraw()
@@ -41,13 +43,16 @@ class _Prompt:
         self.body = tk.Frame(frame, bg=T.SURFACE, padx=pads[0], pady=pads[1])
         self.body.pack(fill="both", expand=True)
         self.body.columnconfigure(0, weight=1, minsize=px(460))
+        head, wrap = self.host.prompt_head(self.body, title) if self.host else (0, px(600))
         context = self.host.prompt_context() if self.host else ""
         caption = f"{context}  ·  {title}" if context else title
-        label(self.body, caption.upper(), "caption", _TONES.get(tone, T.ACCENT_DARK)).grid(row=0, column=0, sticky="w")
+        if not head:  # A heading names the drawer, so it stands in for the caption.
+            label(self.body, caption.upper(), "caption", _tone_color(tone)).grid(row=0, column=0, sticky="w")
         if message:
-            label(self.body, message, "prompt", wraplength=px(600)).grid(row=1, column=0, sticky="w", pady=(px(10), 0))
-        self.row = 2
-        self.footer = tk.Frame(self.body, bg=T.SURFACE)
+            label(self.body, message, "prompt", wraplength=wrap).grid(row=head + 1, column=0, sticky="w", pady=(px(10), 0))
+        self.row = head + 2
+        # UI two keeps the buttons at the foot of the panel, whatever the step above them needs.
+        self.footer = tk.Frame(frame if T.console() else self.body, bg=T.SURFACE)
         self.error = tk.StringVar()
 
     def add(self, widget, pady=(20, 0)):
@@ -59,7 +64,7 @@ class _Prompt:
         self.add(label(self.body, font="body", fg=T.DANGER, textvariable=self.error), pady=(8, 0))
 
     def button(self, text, command, kind="Secondary"):
-        button = ttk.Button(self.footer, text=text, command=command, width=-8,
+        button = ttk.Button(self.footer, text=T.caps(text), command=command, width=-8,
                             style=self.theme.button_style(kind, T.SURFACE, large=True))
         button.pack(side="left", padx=(0, self.theme.px(12)))
         button.bind("<Return>", lambda _: (button.invoke(), "break")[1])
@@ -78,7 +83,10 @@ class _Prompt:
             self.top.destroy()
 
     def show(self, focus):
-        self.footer.grid(row=self.row, column=0, sticky="w", pady=(self.theme.px(28), 0))
+        if T.console():
+            self.footer.pack(side="bottom", fill="x", before=self.body, padx=self.theme.px(24), pady=(0, self.theme.px(18)))
+        else:
+            self.footer.grid(row=self.row, column=0, sticky="w", pady=(self.theme.px(28), 0))
         if self.host:
             focus.focus_set()
             try:
@@ -134,7 +142,22 @@ def askyesno(title, message, parent=None, yes="Yes", no="No", danger=False):
     return bool(prompt.show(accept))
 
 
-def _ask(title, text, parent, initialvalue, convert, scan=False, confirm="Continue", error=""):
+def _steps(prompt, rows):
+    """UI two's list under a scan: (unit number, status, serial, time, tone)."""
+    px = prompt.theme.px
+    frame = prompt.add(tk.Frame(prompt.body, bg=T.SURFACE), pady=(4, 0))
+    frame.columnconfigure(2, weight=1)
+    for index, (number, status, serial, time, tone) in enumerate(rows):
+        color = {"now": T.ACCENT, "later": T.MUTED}.get(tone, T.TEXT)
+        for column, (text, fg, sticky) in enumerate(((str(number), T.MUTED, "w"), (status, color, "w"), (serial, T.TEXT, "w"),
+                                                     (time, T.MUTED, "e"))):
+            label(frame, text, "mono_small", fg, width=4 if column == 0 else 0).grid(
+                row=index * 2, column=column, sticky=sticky, padx=(0, px(10)), pady=px(8))
+        if index + 1 < len(rows):
+            tk.Frame(frame, height=1, bg=T.BORDER).grid(row=index * 2 + 1, column=0, columnspan=4, sticky="ew")
+
+
+def _ask(title, text, parent, initialvalue, convert, scan=False, confirm="Continue", error="", steps=None, reopen=False):
     prompt = _Prompt(parent, title, text)
     entry = prompt.add(ttk.Entry(prompt.body, font=prompt.theme.font("scan" if scan else "input")))
     if initialvalue is not None:
@@ -142,6 +165,8 @@ def _ask(title, text, parent, initialvalue, convert, scan=False, confirm="Contin
         entry.select_range(0, "end")
     prompt.error_slot()
     prompt.error.set(error)
+    if steps:
+        _steps(prompt, steps)
 
     def submit(_event=None):
         try:
@@ -152,6 +177,8 @@ def _ask(title, text, parent, initialvalue, convert, scan=False, confirm="Contin
             entry.select_range(0, "end")
         return "break"
     prompt.button(confirm, submit, "Primary")
+    if reopen:
+        prompt.button("Reopen drawer", lambda: prompt.close(""))  # the same as submitting an empty scan
     prompt.button("Cancel", prompt.close)
     entry.bind("<Return>", submit)
     entry.bind("<Escape>", lambda _: (prompt.close(), "break")[1])
@@ -173,11 +200,11 @@ def askinteger(title, prompt, parent=None, minvalue=None, maxvalue=None, initial
     return _ask(title, prompt, parent, initialvalue, convert)
 
 
-def askstring(title, prompt, parent=None, initialvalue=None, scan=False, error=""):
+def askstring(title, prompt, parent=None, initialvalue=None, scan=False, error="", steps=None, reopen=False):
     """Returns the text, possibly empty, or None when cancelled. `error` says
     why a previous answer was rejected."""
     return _ask(title, prompt, parent, initialvalue, lambda text: text, scan=scan,
-                confirm="Submit scan" if scan else "Continue", error=error)
+                confirm="Submit scan" if scan else "Continue", error=error, steps=steps, reopen=reopen)
 
 
 def askchoices(title, prompt, options, parent=None):
@@ -199,7 +226,7 @@ def askchoices(title, prompt, options, parent=None):
     for text in options:
         variable = tk.BooleanVar(value=False)
         variables.append(variable)
-        ttk.Checkbutton(area.body, text=text, variable=variable, style="Check.TCheckbutton",
+        ttk.Checkbutton(area.body, text=text, variable=variable, style=dialog.theme.check_style(),
                         command=recount).pack(anchor="w", padx=px(14))
     recount()
 
@@ -208,7 +235,7 @@ def askchoices(title, prompt, options, parent=None):
             variable.set(value)
         recount()
     for text, value in (("Clear", False), ("Select all", True)):
-        ttk.Button(toolbar, text=text, style=dialog.theme.button_style("Ghost"),
+        ttk.Button(toolbar, text=T.caps(text), style=dialog.theme.button_style("Ghost"),
                    command=lambda v=value: every(v)).pack(side="right")
     accept = dialog.button("Continue", lambda: dialog.close([i for i, v in enumerate(variables) if v.get()]), "Primary")
     dialog.button("Cancel", dialog.close)

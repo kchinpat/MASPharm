@@ -9,12 +9,13 @@ import json
 import time
 from unittest.mock import patch
 
-from pharm.app import PROGRESS_SECONDS, App, plural
+from pharm.app import PROGRESS_SECONDS, App, capitalized, plural, saved_palette, saved_ui, save_palette, startup_palette
 from pharm.catalog import Catalog, identifier
 from pharm.hardware import Result, Simulator
 from pharm.store import Store
 from pharm.widgets import Progress
 from test_inventory import PRODUCT
+from UI import theme as T
 
 # A 1x1 GIF, which Tk shows without an image library.
 GIF = (b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00"
@@ -69,6 +70,49 @@ class LoadingScreenTests(unittest.TestCase):
         operation = store.begin("load", 1, 2, PRODUCT, actor)
         store.access(operation, actor)
         store.finish(operation, actor, closed=True)
+
+    def scan_top_bar(self, code):
+        self.app.scan.insert(0, code)
+        self.app.find()
+        self.root.update()
+
+    def test_top_bar_scan_of_a_new_package_fills_the_selected_drawers_load_form(self):
+        self.gs1_catalog()
+        self.app.select(3)
+        self.scan_top_bar("(01)00001234567895(21)TOP-BOX(17)991231(10)TOP-LOT")
+        self.assertEqual(("load", 3), (self.app.view, self.app.selected))
+        fields = self.app.load_form["fields"]
+        self.assertEqual((PRODUCT["generic_name"], PRODUCT["ndc"], "TOP-LOT", "2099-12-31"),
+                         tuple(fields[k].get() for k in ("generic_name", "ndc", "lot", "expiry_date")))
+        self.assertIsNone(self.app.store.active())  # nothing unlocks until the details are confirmed
+        fields["unit"].insert(0, "box")
+        self.messages.askyesno.return_value = True
+        with patch("pharm.app.dialogs.askinteger", return_value=1):
+            self.app.load_form["load"].invoke()
+        self.pump_until(lambda: self.app.store.compartments()[2]["quantity"] == 1)
+        self.assertEqual("TOP-BOX", self.app.store.compartments()[2]["items"][0]["serial"])
+
+    def test_top_bar_scan_of_a_new_package_leaves_a_stocked_drawer_alone(self):
+        self.load_existing()
+        self.app.home()
+        self.scan_top_bar("9999999999")
+        self.assertEqual("drawer", self.app.view)
+        self.assertIn("select an empty drawer", self.app.status_text.get())
+        self.assertIn(PRODUCT["generic_name"], self.app.status_text.get())
+
+    def test_top_bar_scan_of_a_stocked_package_still_dispenses_from_its_drawer(self):
+        self.load_existing()
+        self.app.select(3)
+        self.messages.askinteger.return_value = None
+        self.scan_top_bar(PRODUCT["ndc"])
+        self.assertEqual(("drawer", 1), (self.app.view, self.app.selected))
+        self.assertEqual("Dispense", self.messages.askinteger.call_args.args[0])
+
+    def test_top_bar_scan_that_is_not_a_barcode_opens_nothing(self):
+        self.scan_top_bar("not a barcode")
+        self.assertEqual("drawer", self.app.view)
+        self.assertEqual("Unsupported package barcode format.", self.app.status_text.get())
+        self.messages.showerror.assert_not_called()
 
     def test_missing_catalog_scan_populates_manual_identifier(self):
         entries, button = self.form()
@@ -263,7 +307,211 @@ class LoadingScreenTests(unittest.TestCase):
         self.assertEqual(identifier(PRODUCT["ndc"]), identifier(self.download.call_args.args[1]))
 
 
+class UiTwoTests(unittest.TestCase):
+    """UI two, the Console layout and the default, driven through the real window."""
+
+    def setUp(self):
+        try:
+            self.root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Desktop Tcl/Tk is unavailable: {exc}")
+        self.addCleanup(T.use_palette, "light")
+        self.addCleanup(self.root.destroy)
+        self.root.withdraw()
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        directory = Path(self.temp.name)
+        patch("pharm.app.fetch_photo", side_effect=ValueError("No photo in tests.")).start()
+        self.addCleanup(patch.stopall)
+        path = directory / "catalog.json"
+        path.write_text(json.dumps([{"generic_name": PRODUCT["generic_name"], "active_ingredients": [{"strength": ".5 mg/1"}],
+                                     "packaging": [{"package_ndc": PRODUCT["ndc"]}]}]))
+        store = Store(directory / "inventory.sqlite3")
+        T.use_palette(startup_palette(directory))  # as main() starts the window
+        self.app = App(self.root, store, Catalog(path), Simulator())
+        self.addCleanup(self.app.executor.shutdown, wait=True)
+        self.messages = patch("pharm.app.dialogs").start()
+        operation = store.begin("load", 2, 2, PRODUCT, self.app.operator)
+        store.access(operation, self.app.operator)
+        store.finish(operation, self.app.operator, closed=True)
+        self.app.home()
+        self.root.update()
+
+    def switch(self):
+        self.app.toggle_ui()
+        self.root.update()
+
+    def texts(self, parent):
+        found, pending = [], [parent]
+        while pending:
+            widget = pending.pop()
+            pending.extend(widget.winfo_children())
+            if isinstance(widget, (tk.Label, ttk.Button)):
+                found.append(widget.cget("text"))
+        return found
+
+    def menu(self):
+        return [entry[0] for entry in self.app.main_menu() if entry]
+
+    def test_ui_two_is_the_default_and_the_switch_works_both_ways_and_is_remembered(self):
+        directory = self.app.store.path.parent
+        self.assertEqual("two", saved_ui(directory))
+        self.assertEqual("console", T.PALETTE)
+        self.assertIn("Switch to legacy UI", self.menu())
+        self.assertIn("Light theme", self.menu())
+        self.switch()
+        self.assertFalse(T.console())
+        self.assertEqual("one", saved_ui(directory))
+        self.assertEqual("light", startup_palette(directory))
+        self.assertIn("Switch to new UI", self.menu())
+        self.assertIn("Dark theme", self.menu())
+        self.assertEqual("#ffffff", T.SURFACE)
+        self.switch()
+        self.assertEqual("console", T.PALETTE)
+        self.assertEqual("two", saved_ui(directory))
+
+    def test_the_menu_opens_in_ui_two_and_its_item_switches_to_the_legacy_ui(self):
+        with patch("tkinter.Menu.tk_popup"), patch("tkinter.Menu.add_command") as add:
+            self.app.popup(self.app.scan, self.app.main_menu())
+        labels = [call.kwargs["label"] for call in add.call_args_list]
+        self.assertEqual(["Light theme", "Switch to legacy UI"], labels[-2:])
+        add.call_args_list[-1].kwargs["command"]()
+        self.assertFalse(T.console())
+
+    def test_each_ui_returns_to_its_own_saved_theme(self):
+        directory = self.app.store.path.parent
+        save_palette(directory, "dark")
+        self.switch()
+        self.assertEqual("dark", T.PALETTE)
+        self.switch()
+        self.assertEqual("console", T.PALETTE)
+        self.assertEqual("dark", saved_palette(directory))
+
+    def test_ui_two_has_a_light_theme_of_its_own_that_is_remembered(self):
+        directory = self.app.store.path.parent
+        self.app.toggle_theme()
+        self.root.update()
+        self.assertEqual("console_light", T.PALETTE)
+        self.assertTrue(T.console())
+        self.assertIn("Dark theme", self.menu())
+        self.assertEqual(("console_light", "light"), (saved_palette(directory, two=True), saved_palette(directory)))
+        self.assertEqual("console_light", startup_palette(directory))
+        # The window is redrawn in the light palette, and its styles are not the legacy UI's.
+        self.assertEqual(("#eef1f3", "#ffffff"), (self.root.cget("bg"), self.app.panel.cget("bg")))
+        self.assertIn(T.IDLE, [w.cget("bg") for w in self.app.cabinet.winfo_children() if w is not self.app.panel_box])
+        self.assertEqual(3, self.columns().count("Empty"))
+        self.assertNotEqual("Primary.TButton", self.app.theme.button_style("Primary"))
+        self.switch()
+        self.assertEqual("light", T.PALETTE)
+        self.switch()
+        self.assertEqual("console_light", T.PALETTE)
+        self.app.toggle_theme()
+        self.assertEqual(("console", "console"), (T.PALETTE, saved_palette(directory, two=True)))
+
+    def test_home_shows_every_drawer_with_its_strength_and_no_panel(self):
+        self.assertEqual(0, self.app.focus_drawer(None))
+        self.assertFalse(self.app.panel_box.winfo_ismapped())
+        shown = self.columns()
+        self.assertEqual(3, shown.count("Empty"))
+        self.assertIn(capitalized(PRODUCT["generic_name"]), shown)
+        self.assertIn(f"0.5 mg  ·  {PRODUCT['labeler_name']}" if PRODUCT.get("labeler_name") else "0.5 mg", shown)
+        self.assertEqual(1, shown.count("DISPENSE"))
+        self.assertEqual(3, len([t for t in shown if t.startswith("LOAD DRAWER")]))
+
+    def columns(self):
+        """The text on the drawers, without the panel that is out of view."""
+        return [text for widget in self.app.cabinet.winfo_children() if widget is not self.app.panel_box
+                for text in self.texts(widget)]
+
+    def test_the_drawer_being_worked_on_widens_and_the_others_hold(self):
+        self.app.loading(2)
+        self.root.update()
+        self.assertEqual(2, self.app.focus_drawer(None))
+        self.assertEqual(1, self.app.panel_box.grid_info()["column"])
+        self.assertEqual(3, self.columns().count("HELD"))
+        self.assertEqual(3, len([w for w in self.app.cabinet.winfo_children() if w is not self.app.panel_box]))
+
+    def test_a_step_about_no_one_drawer_sits_after_them_all(self):
+        self.app.busy, self.app.context = True, ""
+        self.assertEqual(5, self.app.focus_drawer(None))
+        self.app.busy = False
+
+    def test_more_opens_the_drawer_and_close_returns_to_the_columns(self):
+        self.app.show_detail(2)
+        self.root.update()
+        self.assertEqual(2, self.app.focus_drawer(None))
+        self.assertIn("LOAD MORE", self.texts(self.app.content))
+        self.app.close_detail()
+        self.root.update()
+        self.assertEqual(0, self.app.focus_drawer(None))
+
+    def test_an_outstanding_count_holds_every_other_drawer(self):
+        operation = self.app.store.begin("dispense", 2, 1, {}, self.app.operator)
+        self.app.store.access(operation, self.app.operator)
+        self.app.store.cancel(operation, self.app.operator, "Interrupted")
+        self.app.home()
+        self.assertEqual(2, self.app.focus_drawer(self.app.store.active()))
+        self.assertEqual(3, self.columns().count("HELD"))
+        self.assertEqual("DRAWER 2 NEEDS A COUNT", self.app.placeholder.cget("text"))
+
+    def test_recent_activity_reads_as_plain_sentences(self):
+        shown = self.texts(self.app.log_rows)
+        self.assertIn(f"Loaded 2 bottles of {PRODUCT['generic_name']} into drawer 2", shown)
+        self.assertEqual(2, len(shown))  # a time and one line; the session start is not shown
+        self.assertFalse(any("local-workstation" in text or "operator" in text for text in shown))
+
+    def test_load_form_shows_strength_and_serial_but_saves_neither(self):
+        self.app.loading(1)
+        self.root.update()
+        form = self.app.load_form
+        self.assertNotIn("strength", form["fields"])
+        self.assertNotIn("serial", form["fields"])
+        form["scan"].insert(0, PRODUCT["ndc"])
+        form["lookup"].invoke()
+        self.assertEqual(PRODUCT["ndc"], form["fields"]["ndc"].get())
+        self.assertIn("0.5 mg", self.entries(self.app.content))
+
+    def entries(self, parent):
+        found, pending = [], [parent]
+        while pending:
+            widget = pending.pop()
+            pending.extend(widget.winfo_children())
+            if isinstance(widget, ttk.Entry):
+                found.append(widget.get())
+        return found
+
+    def test_a_new_package_scanned_on_home_goes_to_the_first_empty_drawer(self):
+        self.app.selected = 2
+        self.app.load_scan("9999999999")
+        self.assertEqual(("load", 1), (self.app.view, self.app.selected))
+
+    def test_dispensing_lists_each_scan_and_offers_reopen(self):
+        self.messages.askinteger.return_value = 2
+        self.messages.askstring.side_effect = [PRODUCT["ndc"], None]
+        self.messages.askyesno.return_value = True
+        self.app.dispense(2)
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and self.messages.askstring.call_count < 2:
+            self.root.update()
+            time.sleep(0.01)
+        first, second = self.messages.askstring.call_args_list
+        self.assertTrue(first.kwargs["reopen"])
+        self.assertEqual("Scan now", first.kwargs["steps"][0][1])
+        self.assertEqual(("Verified", "Scan now"), (second.kwargs["steps"][0][1], second.kwargs["steps"][1][1]))
+        self.assertEqual(f"Scan {PRODUCT['unit']} 2 of 2", second.args[1])
+
+    def test_a_long_dispense_only_lists_the_units_around_the_current_one(self):
+        rows = self.app.dispense_steps([("A", "t")] * 5, 20)
+        self.assertEqual([(5, "Verified"), (6, "Scan now"), (7, "Waiting")], [row[:2] for row in rows])
+        self.assertEqual(2, len(self.app.dispense_steps([], 2)))
+
+
 class PluralTests(unittest.TestCase):
+    def test_a_catalog_name_keeps_its_spelling_with_a_capital_to_start(self):
+        self.assertEqual("Warfarin Sodium", capitalized("Warfarin Sodium"))
+        self.assertEqual("Alprazolam", capitalized("alprazolam"))
+        self.assertEqual("", capitalized(""))
+
     def test_catalog_unit_types_read_naturally(self):
         for unit, expected in (("bottle", "bottles"), ("box", "boxes"), ("blister pack", "blister packs"), ("mL", "mL")):
             with self.subTest(unit=unit):

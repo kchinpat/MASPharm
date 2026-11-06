@@ -257,8 +257,6 @@ class Store:
         if items is not None and (kind != "load" or not isinstance(items, list) or len(items) != count):
             raise ValueError("Supply one package record for each loaded unit.")
         self._role(db, operator, admin=kind in ("load", "unload", "manual"))
-        if kind == "manual" and not reason.strip():
-            raise ValueError("A reason is required for manual access.")
         if db.execute("SELECT 1 FROM operations WHERE state IN ('pending','access','reconciliation')").fetchone():
             raise ValueError("Complete or reconcile the outstanding operation first.")
         row = db.execute("SELECT * FROM compartments WHERE id=?", (compartment,)).fetchone()
@@ -425,7 +423,8 @@ class Store:
             self._role(db, operator, admin=True)
             row = self._operation(db, operation, operator)
             if count and not json.loads(row["product"]):
-                raise ValueError("Unidentified stock cannot be reconciled. Remove it and reconcile to zero, then load it properly.")
+                raise ValueError("This drawer has no recorded product, so a count alone cannot identify its contents. "
+                                 "Remove and identify unrecorded stock before loading it. Save zero only if the drawer is empty.")
             candidates = {r["id"]: dict(r) for r in db.execute("SELECT * FROM stock_items WHERE compartment=?", (row["compartment"],))}
             if row["kind"] == "load":
                 candidates.update({r["id"]: dict(r) for r in db.execute("SELECT * FROM operation_items WHERE operation=?", (operation,))})
@@ -448,6 +447,15 @@ class Store:
     def audit(self):
         with self.connect() as db:
             return [dict(row) for row in db.execute("SELECT * FROM events ORDER BY id")]
+
+    def recent_events(self, actions, limit):
+        """The newest events of these kinds, newest first, each with its operation's details."""
+        marks = ",".join("?" * len(actions))
+        with self.connect() as db:
+            return [dict(row) for row in db.execute(
+                "SELECT e.time, e.action, e.detail, o.kind, o.compartment, o.requested, o.product, o.reason, o.state "
+                f"FROM events e JOIN operations o ON o.id = e.operation WHERE e.action IN ({marks}) "
+                "ORDER BY e.id DESC LIMIT ?", (*actions, limit))]
 
     def backup(self, destination):
         destination = Path(destination)

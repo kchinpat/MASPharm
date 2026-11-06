@@ -1,6 +1,7 @@
-/* Pharmacy Drawer browser UI: the cabinet's four drawer fronts on the left,
-   one work panel on the right where every step happens. Colors match UI/theme.py.
-   The shell is light by default; the Menu switches it to dark (data-theme).
+/* Pharmacy Drawer browser UI. These first rules are the legacy UI: the
+   cabinet's four drawer fronts on the left, one work panel on the right where
+   every step happens. Colors match UI/theme.py. Its shell is light unless the
+   Menu switched it to dark (data-theme).
    Light drawer edges: red when empty, blue when stocked, green while open.
    Dark drawers stay plain, with an accent outline on the selected one. */
 :root {
@@ -22,7 +23,7 @@
   --font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, Roboto, "Helvetica Neue", sans-serif;
   --mono: Consolas, "Cascadia Mono", ui-monospace, Menlo, monospace;
 }
-:root[data-theme="dark"] {
+:root[data-theme="dark"]:not([data-ui="two"]) {
   --header: #161c26; --header-text: #f1f5f9; --header-muted: #99f6e4; --header-warning: #fbbf24;
   --shell: #161c26; --shell-raised: #222a37; --shell-line: #364152; --card-line: transparent;
   --shell-hover: #29323f; --shell-selected: #25313f;
@@ -31,13 +32,13 @@
   --header-button: #222a37; --header-button-text: #f1f5f9; --header-button-line: #364152; --header-button-hover: #29323f;
   --logo-tile: #0d9488; --logo-mark: #fff;
 }
-:root[data-theme="dark"] .shell { padding-top: 4px; }
-:root[data-theme="dark"] .front { padding-left: 22px; box-shadow: none; }
-:root[data-theme="dark"] .front:hover:not(:disabled) { background: var(--shell-hover); }
-:root[data-theme="dark"] .front.selected { background: var(--shell-selected); border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
-:root[data-theme="dark"] .front .num { color: var(--shell-muted); }
-:root[data-theme="dark"] .front.selected .num { color: var(--accent-line); }
-:root[data-theme="dark"] .front .open { color: #4ade80; font-weight: 400; }
+:root[data-theme="dark"]:not([data-ui="two"]) .shell { padding-top: 4px; }
+:root[data-theme="dark"]:not([data-ui="two"]) .front { padding-left: 22px; box-shadow: none; }
+:root[data-theme="dark"]:not([data-ui="two"]) .front:hover:not(:disabled) { background: var(--shell-hover); }
+:root[data-theme="dark"]:not([data-ui="two"]) .front.selected { background: var(--shell-selected); border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+:root[data-theme="dark"]:not([data-ui="two"]) .front .num { color: var(--shell-muted); }
+:root[data-theme="dark"]:not([data-ui="two"]) .front.selected .num { color: var(--accent-line); }
+:root[data-theme="dark"]:not([data-ui="two"]) .front .open { color: #4ade80; font-weight: 400; }
 * { box-sizing: border-box; }
 html, body { height: 100%; }
 body { margin: 0; font: 16px/1.5 var(--font); background: var(--shell); color: var(--text); display: flex; flex-direction: column; }
@@ -172,4 +173,199 @@ input.scan { font-family: var(--mono); font-size: 18px; }
   .view, .prompt, .progress { padding: 28px 20px; }
   .fields { grid-template-columns: 1fr; }
   .fields label.wide, .more-fields { grid-column: auto; }
+}
+
+/* UI two, the Console layout and the default (data-ui on the root; the Menu
+   switches to the legacy UI). Every drawer stays in view as an equal column.
+   Grey is normal: amber appears only on what needs attention and blue only on
+   the drawer being worked on. It is dark unless the Menu switched it to light
+   (data-theme). It shares the legacy UI's elements and workflows. Rules for
+   elements the legacy UI also uses are scoped to data-ui, and the other classes
+   here exist only in UI two. */
+.scan-field { display: contents; }
+.scan-tag, .fields label.console-only { display: none; }
+:root[data-ui="two"] {
+  color-scheme: dark;
+  --header: #101315; --header-text: #e6eaec; --header-muted: #9aa5ac; --header-warning: #9aa5ac;
+  --shell: #101315; --shell-raised: #181c1f; --shell-line: #2e353a; --card-line: #2e353a;
+  --shell-text: #e6eaec; --shell-muted: #9aa5ac; --shell-warning: #ffb020; --shell-danger: #ff8a6b;
+  --field: #181c1f; --field-text: #e6eaec; --field-line: #2e353a; --field-placeholder: #9aa5ac; --field-ring: #2c5a7a;
+  --header-button: #20262a; --header-button-text: #e6eaec; --header-button-line: #3a4248; --header-button-hover: #2a3136;
+  --logo-tile: transparent; --logo-mark: #e6eaec;
+  --surface: #181c1f; --subtle: #20262a; --border: #2e353a; --border-strong: #3a4248;
+  --text: #e6eaec; --soft: #9aa5ac; --muted: #9aa5ac; --faint: #9aa5ac;
+  --accent: #6ec1ff; --accent-dark: #6ec1ff; --accent-soft: #14232e; --accent-line: #2c5a7a;
+  --danger: #ff8a6b; --danger-dark: #ff8a6b; --warning: #ffb020; --warning-dark: #ffc65c;
+  --idle: #14181a; --hover: #2a3136; --primary-hover: #fff; --input: #101315; --menu-shadow: rgba(0, 0, 0, .5);
+  --font: "Bahnschrift SemiCondensed", Bahnschrift, "Barlow Semi Condensed", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --mono: "Cascadia Mono", Consolas, ui-monospace, Menlo, monospace;
+}
+:root[data-ui="two"][data-theme="light"] {
+  color-scheme: light;
+  --header: #eef1f3; --header-text: #14181a; --header-muted: #5b666d; --header-warning: #5b666d;
+  --shell: #eef1f3; --shell-raised: #fff; --shell-line: #d5dadd; --card-line: #d5dadd;
+  --shell-text: #14181a; --shell-muted: #5b666d; --shell-warning: #9a5b00; --shell-danger: #b93c0c;
+  --field: #fff; --field-text: #14181a; --field-line: #d5dadd; --field-placeholder: #5b666d; --field-ring: #9cc3ea;
+  --header-button: #fff; --header-button-text: #14181a; --header-button-line: #b4bcc1; --header-button-hover: #e9edef;
+  --logo-tile: transparent; --logo-mark: #14181a;
+  --surface: #fff; --subtle: #f3f5f6; --border: #d5dadd; --border-strong: #b4bcc1;
+  --text: #14181a; --soft: #5b666d; --muted: #5b666d; --faint: #5b666d;
+  --accent: #0b64c0; --accent-dark: #0b64c0; --accent-soft: #e6f0fa; --accent-line: #9cc3ea;
+  --danger: #b93c0c; --danger-dark: #b93c0c; --warning: #9a5b00; --warning-dark: #7a4800;
+  --idle: #f5f7f8; --hover: #e9edef; --primary-hover: #2e353a; --input: #fff; --menu-shadow: rgba(15, 23, 42, .16);
+}
+
+/* Controls */
+:root[data-ui="two"] button, :root[data-ui="two"] .menu > summary { min-height: 48px; padding: 0 18px; border-radius: 0; border-color: var(--border-strong); background: var(--subtle); color: var(--text); letter-spacing: .04em; text-transform: uppercase; }
+:root[data-ui="two"] button:hover:not(:disabled), :root[data-ui="two"] .menu > summary:hover { background: var(--hover); }
+:root[data-ui="two"] button.primary { background: var(--text); border-color: var(--text); color: var(--shell); font-weight: 700; }
+:root[data-ui="two"] button.primary:hover:not(:disabled) { background: var(--primary-hover); }
+:root[data-ui="two"] button.danger { background: var(--danger); border-color: var(--danger); color: var(--shell); }
+:root[data-ui="two"] button.warning { background: var(--warning); border-color: var(--warning); color: var(--shell); }
+:root[data-ui="two"] button.warning:hover:not(:disabled) { background: var(--warning-dark); }
+:root[data-ui="two"] button.large { min-width: 0; min-height: 52px; padding: 0 20px; font-size: 17px; }
+:root[data-ui="two"] button.link { min-height: 44px; padding: 0 4px; border-color: transparent; background: none; font-size: 16px; letter-spacing: 0; text-decoration: underline; text-transform: none; text-underline-offset: 4px; }
+:root[data-ui="two"] button:focus-visible, :root[data-ui="two"] .menu > summary:focus-visible, :root[data-ui="two"] input:focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+:root[data-ui="two"] input { border-radius: 0; background: var(--input); font-family: var(--mono); }
+:root[data-ui="two"] .menu-list { border: 1px solid var(--border-strong); border-radius: 0; box-shadow: 0 12px 32px var(--menu-shadow); }
+:root[data-ui="two"] .menu-list button, :root[data-ui="two"] .menu-list a { min-height: 44px; padding: 10px 12px; border: 0; background: none; color: var(--text); font-size: 16px; letter-spacing: 0; text-transform: none; }
+:root[data-ui="two"] .menu-list button:hover:not(:disabled), :root[data-ui="two"] .menu-list a:hover { background: var(--subtle); }
+
+/* Top bar */
+:root[data-ui="two"] .topbar { gap: 12px 20px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+:root[data-ui="two"] .brand { gap: 6px; font-size: 17px; letter-spacing: .08em; text-transform: uppercase; }
+:root[data-ui="two"] .scan-field { flex: 1 1 320px; display: flex; align-items: center; gap: 12px; min-width: 0; min-height: 48px; padding: 0 14px; background: var(--field); border: 1px solid var(--field-line); }
+:root[data-ui="two"] .scan-field:focus-within { border-color: var(--border-strong); }  /* it always holds the focus, so this stays grey */
+:root[data-ui="two"] .scan-tag { display: inline; font-size: 14px; font-weight: 600; letter-spacing: .08em; color: var(--muted); text-transform: uppercase; }
+:root[data-ui="two"] .scan-top, :root[data-ui="two"] .scan-top:focus { flex: 1; min-height: 44px; padding: 0; border: 0; background: none; font-family: var(--mono); font-size: 16px; box-shadow: none; }
+:root[data-ui="two"] .scan-top:disabled::placeholder { font-family: var(--font); font-weight: 600; letter-spacing: .04em; color: var(--accent); text-transform: uppercase; }
+:root[data-ui="two"] .mode, :root[data-ui="two"] .mode.hardware { padding: 5px 10px; border: 1px solid var(--border-strong); font-size: 14px; font-weight: 600; letter-spacing: .08em; color: var(--muted); text-transform: uppercase; }
+
+/* The drawers and the panel between them. paintConsole sets the panel's order and data-focus. */
+:root[data-ui="two"] .shell { display: flex; align-items: stretch; gap: 12px; padding: 12px 16px; overflow: auto; }
+:root[data-ui="two"] .cabinet { display: contents; }
+:root[data-ui="two"] .panel { flex: 6 1 560px; min-width: 0; border-radius: 0; }
+:root[data-ui="two"] .shell[data-tone="active"] .panel { border: 2px solid var(--accent); }
+:root[data-ui="two"] .shell[data-tone="warn"] .panel { border: 2px solid var(--warning); }
+:root[data-ui="two"] .shell[data-focus="0"] .panel { display: contents; }
+:root[data-ui="two"] .shell[data-focus="0"] .view { display: none; }
+:root[data-ui="two"] .view, :root[data-ui="two"] .prompt, :root[data-ui="two"] .progress { padding: 18px 24px 20px; }
+:root[data-ui="two"] .caption { color: var(--muted); }
+:root[data-ui="two"] .caption.warn, :root[data-ui="two"] .prompt.warn .caption { color: var(--warning); }
+:root[data-ui="two"] .view > h2::first-letter { text-transform: uppercase; }
+:root[data-ui="two"] .facts { margin-top: 16px; }
+:root[data-ui="two"] .facts .urgent, :root[data-ui="two"] .facts .urgent span { color: var(--warning); }
+:root[data-ui="two"] .package, :root[data-ui="two"] .photo { margin-top: 12px; }
+:root[data-ui="two"] .actions { padding-top: 12px; }
+:root[data-ui="two"] .actions .row { gap: 8px; }
+:root[data-ui="two"] #message { position: fixed; left: 16px; right: 16px; bottom: 12px; z-index: 20; padding: 12px 16px; border: 1px solid var(--accent); }  /* over the event log, never the drawers' buttons */
+.panel-close { position: absolute; top: 10px; right: 16px; z-index: 4; }
+
+.channel { flex: 1 1 260px; display: flex; flex-direction: column; gap: 12px; box-sizing: border-box; min-width: 0; padding: 16px 18px 18px; background: var(--surface); border: 1px solid var(--border); }
+.channel.attention { border-color: var(--warning); }
+.channel.idle { background: var(--idle); }
+.channel-top, .prompt-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; min-height: 44px; }
+.prompt-top { align-items: center; justify-content: flex-start; min-height: 0; }
+.channel .num, .prompt-top .num, .tile .num { font-family: var(--mono); font-size: 32px; font-weight: 500; line-height: 1; color: var(--muted); }
+.tag { padding: 4px 8px; font-size: 14px; font-weight: 700; letter-spacing: .06em; color: var(--shell); text-transform: uppercase; background: var(--warning); }
+.tag.active { background: var(--accent); }
+.who { min-height: 84px; }
+.who h2 { font-size: 24px; font-weight: 600; line-height: 1.2; }
+.who h2::first-letter, .prompt-head h3::first-letter, .tile .name::first-letter { text-transform: uppercase; }
+.who p { margin-top: 4px; font-size: 16px; line-height: 1.35; color: var(--muted); }
+.channel.idle h2, .channel.idle .stock b { color: var(--muted); }
+.stock { display: flex; align-items: baseline; gap: 10px; }
+.stock b { font-family: var(--mono); font-size: 88px; font-weight: 500; line-height: 1; letter-spacing: -.04em; }
+.stock span { font-size: 18px; color: var(--muted); }
+.life { display: flex; flex-direction: column; gap: 6px; font-size: 14px; }
+.life > div:first-child { display: flex; justify-content: space-between; gap: 8px; }
+.life > div:first-child span { letter-spacing: .06em; color: var(--muted); text-transform: uppercase; }
+.life b { font-family: var(--mono); font-weight: 400; }
+.life p { color: var(--muted); }
+.life.urgent b, .life.urgent p { font-weight: 700; color: var(--warning); }
+.gauge { position: relative; height: 6px; background: var(--border); }
+.gauge span { display: block; height: 6px; background: var(--muted); }
+.gauge i { position: absolute; top: -3px; left: 8.5%; width: 1px; height: 12px; background: var(--text); }  /* the 31-day warning line on a one-year scale */
+.life.urgent .gauge span { background: var(--warning); }
+.channel dl, .prompt-side dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; margin: 0; font-size: 14px; }
+.channel dt, .prompt-side dt { letter-spacing: .06em; color: var(--muted); text-transform: uppercase; }
+.channel dd, .prompt-side dd { margin: 0; font-family: var(--mono); text-align: right; overflow-wrap: anywhere; }
+.prompt-side dd.urgent { font-weight: 700; color: var(--warning); }
+.channel-actions { margin-top: auto; display: flex; gap: 8px; }
+:root[data-ui="two"] .channel-actions button { flex: 0 0 auto; min-height: 52px; padding: 0 12px; font-size: 17px; }
+:root[data-ui="two"] .channel-actions button.primary, :root[data-ui="two"] .channel-actions button:only-child { flex: 1 1 auto; }
+:root[data-ui="two"] .tile { flex: 1 1 140px; flex-direction: column; align-items: flex-start; justify-content: flex-start; gap: 10px; box-sizing: border-box; min-width: 0; padding: 16px 14px; border-color: var(--border); background: var(--idle); font-weight: 400; letter-spacing: 0; text-align: left; text-transform: none; white-space: normal; }
+:root[data-ui="two"] .tile:disabled { opacity: 1; }
+.tile .name { display: block; font-size: 17px; font-weight: 500; line-height: 1.25; color: var(--muted); }
+.tile b { font-family: var(--mono); font-size: 40px; font-weight: 500; line-height: 1; color: var(--muted); }
+.tile .soon { font-size: 15px; font-weight: 600; color: var(--warning); }
+.tile .held { margin-top: auto; font-size: 14px; font-weight: 600; letter-spacing: .08em; color: var(--muted); text-transform: uppercase; }
+
+/* Load form: three columns, with the fields to check against the label outlined */
+:root[data-ui="two"] #load-caption, :root[data-ui="two"] #serial { display: none; }
+:root[data-ui="two"] #load-title { display: flex; align-items: center; gap: 14px; margin: 0; font-size: 30px; }
+:root[data-ui="two"] #load-title::before { content: attr(data-num); font-family: var(--mono); font-size: 32px; font-weight: 500; color: var(--muted); }
+:root[data-ui="two"] .scan-row { position: relative; gap: 8px; margin-top: 12px; }
+:root[data-ui="two"] .scan-row::before { content: "Scan"; position: absolute; left: 12px; top: 50%; transform: translateY(-50%); font-size: 14px; font-weight: 600; letter-spacing: .08em; color: var(--muted); text-transform: uppercase; pointer-events: none; }
+:root[data-ui="two"] #load-scan { padding-left: 62px; font-size: 14px; }
+:root[data-ui="two"] #lookup-notice { color: var(--accent); }
+:root[data-ui="two"] #load-view > .fields { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 12px; margin-top: 10px; padding-top: 0; border-top: 0; }
+:root[data-ui="two"] .more-fields { display: none; }  /* showUi moves its fields into the grid */
+:root[data-ui="two"] .fields label, :root[data-ui="two"] .fields label.wide { grid-column: auto; gap: 4px; margin-top: 0; font-size: 14px; font-weight: 400; letter-spacing: .06em; color: var(--muted); text-transform: uppercase; }
+:root[data-ui="two"] .fields input { min-height: 44px; padding: 0 10px; font-family: var(--font); font-size: 17px; letter-spacing: 0; text-transform: none; }
+:root[data-ui="two"] #field-ndc, :root[data-ui="two"] #field-lot, :root[data-ui="two"] #field-expiry_date, :root[data-ui="two"] #show-serial { font-family: var(--mono); font-size: 15px; }
+:root[data-ui="two"] .fields label.console-only { display: flex; }
+:root[data-ui="two"] #field-lot, :root[data-ui="two"] #field-expiry_date, :root[data-ui="two"] #field-unit { border: 2px solid var(--accent); }
+:root[data-ui="two"] [data-field="generic_name"] { order: 1; }
+:root[data-ui="two"] [data-field="strength"] { order: 2; }
+:root[data-ui="two"] [data-field="unit"] { order: 3; }
+:root[data-ui="two"] [data-field="ndc"] { order: 4; }
+:root[data-ui="two"] [data-field="lot"] { order: 5; }
+:root[data-ui="two"] [data-field="expiry_date"] { order: 6; }
+:root[data-ui="two"] [data-field="brand_name"] { order: 7; }
+:root[data-ui="two"] [data-field="labeler_name"] { order: 8; }
+:root[data-ui="two"] [data-field="serial"] { order: 9; }
+:root[data-ui="two"] .fields label[data-field="description"] { order: 10; grid-column: 1 / -1; }
+:root[data-ui="two"] #load-box { flex: 1 1 280px; }
+
+/* Guided step: the drawer on top, the step and its input, and the label beside them */
+:root[data-ui="two"] .prompt { display: grid; grid-template-columns: minmax(0, 1fr) 230px; grid-template-rows: auto auto auto auto 1fr auto; gap: 10px 24px; }
+:root[data-ui="two"] .prompt:has(#prompt-side[hidden]) { grid-template-columns: minmax(0, 1fr); }
+:root[data-ui="two"] .prompt .caption { grid-row: 2; }
+:root[data-ui="two"] .prompt h2 { grid-row: 3; max-width: none; margin-top: 0; font-size: 32px; font-weight: 700; line-height: 1.15; }
+:root[data-ui="two"] .prompt input { grid-row: 4; max-width: none; min-height: 56px; margin-top: 0; font-size: 18px; }
+:root[data-ui="two"] #dialog-extra { grid-row: 5; min-width: 0; }
+:root[data-ui="two"] .prompt .buttons { grid-column: 1 / -1; grid-row: 6; align-self: end; gap: 8px; margin-top: 0; }
+:root[data-ui="two"] .box-list { max-width: none; border-radius: 0; }
+.prompt-head { grid-column: 1 / -1; grid-row: 1; }
+.prompt-head h3 { margin-top: 10px; font-size: 30px; font-weight: 600; line-height: 1.2; }
+.prompt-head p { margin-top: 2px; font-size: 17px; color: var(--muted); }
+.prompt-head:not([hidden]) + .caption { display: none; }
+.prompt-side { grid-column: 2; grid-row: 2 / 6; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.prompt-side img { box-sizing: border-box; width: 100%; max-height: none; margin-top: 0; padding: 6px; background: #fff; }
+.steps { max-height: 160px; overflow: auto; font-family: var(--mono); font-size: 15px; }
+.steps > div { display: grid; grid-template-columns: 28px 96px minmax(0, 1fr) auto; gap: 10px; align-items: center; min-height: 38px; border-bottom: 1px solid var(--border); }
+.steps > div:last-child { border-bottom: 0; }
+.steps b { font-weight: 400; }
+.steps .now b { font-weight: 700; color: var(--accent); }
+.steps .later b, .steps span:first-child, .steps span:last-child { color: var(--muted); }
+
+/* Recent activity */
+.log { flex: none; padding: 6px 16px 12px; background: var(--shell); border-top: 1px solid var(--border); }
+.log-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 44px; }
+.log-head h2 { font-size: 14px; font-weight: 600; letter-spacing: .08em; color: var(--muted); text-transform: uppercase; }
+.log-head a { display: inline-flex; align-items: center; min-height: 44px; font-size: 15px; font-weight: 600; letter-spacing: .04em; color: var(--text); text-decoration: none; text-transform: uppercase; }
+.log-head a:hover { text-decoration: underline; }
+.log-rows { font-size: 15px; }
+.log-rows > div { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 16px; align-items: baseline; min-height: 28px; }
+.log-rows span:first-child { font-family: var(--mono); font-size: 14px; color: var(--muted); }
+.log-rows span:only-child { font-family: var(--font); font-size: 15px; }
+.log-rows .attention span:last-child { color: var(--warning); }
+
+@media (max-width: 860px) {
+  :root[data-ui="two"] .shell { flex-wrap: wrap; }
+  :root[data-ui="two"] .scan-field { order: 3; flex-basis: 100%; }
+  :root[data-ui="two"] .prompt { grid-template-columns: minmax(0, 1fr); }
+  .prompt-side { grid-column: 1; grid-row: auto; }
+  :root[data-ui="two"] #load-view > .fields { grid-template-columns: minmax(0, 1fr); }
 }

@@ -33,10 +33,20 @@ def shared(packages):
     return fields if "generic_name" in fields else {}
 
 
+def strength_text(product):
+    """A catalog product's strength as printed on a label, such as "0.25 mg" for
+    ".25 mg/1" or "5 mg / 325 mg" for two active ingredients, or ""."""
+    ingredients = product.get("active_ingredients")
+    amounts = [str(item["strength"]).strip() for item in ingredients if isinstance(item, dict) and item.get("strength")] \
+        if isinstance(ingredients, list) else []
+    return " / ".join(("0" + amount if amount.startswith(".") else amount).removesuffix("/1") for amount in amounts)
+
+
 class Catalog:
     def __init__(self, path):
         self.index = {}
         self.products = {}  # "labeler-product" NDC segments -> packages
+        self.strengths = {}  # package identifier -> strength, kept apart so lookups match as before
         self.warning = ""
         path = Path(path)
         if not path.exists():
@@ -55,6 +65,7 @@ class Catalog:
                 if not isinstance(packages, list):
                     continue
                 valid = []
+                strength = strength_text(product)
                 for package in packages:
                     if not isinstance(package, dict):
                         continue
@@ -66,6 +77,8 @@ class Catalog:
                             ("generic_name", "brand_name", "labeler_name")}
                     item.update(ndc=package["package_ndc"], description=str(package.get("description") or ""))
                     self.index.setdefault(code, []).append(item)
+                    if self.strengths.setdefault(code, strength) != strength:
+                        self.strengths[code] = ""  # entries disagree, so show none rather than guess
                     valid.append(item)
                     segments = item["ndc"].strip().split("-")
                     if len(segments) == 3:
@@ -82,6 +95,13 @@ class Catalog:
                 self.warning = "Catalog contains no usable packages. Manual entry is available."
         except (OSError, ValueError) as exc:
             self.warning = f"Catalog unavailable: {exc}"
+
+    def strength(self, ndc):
+        """A package's strength for display. It is never saved with stock."""
+        try:
+            return self.strengths.get(identifier(ndc), "")
+        except ValueError:
+            return ""
 
     def lookup(self, scan):
         parsed = read_scan(scan)

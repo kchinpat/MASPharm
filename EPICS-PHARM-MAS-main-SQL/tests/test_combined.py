@@ -7,8 +7,9 @@ import tempfile
 import threading
 import unittest
 from unittest.mock import Mock, patch
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
+from pharm import activity
 from pharm.barcodes import read_scan, expiry_date, drug_ndc
 from pharm.catalog import Catalog, identifier
 from pharm.hardware import Simulator, Result
@@ -93,7 +94,98 @@ class CombinedFixture(unittest.TestCase):
         self.service.finish(op["id"], placed=True, closed=True)
 
 
+class ActivityTests(CombinedFixture):
+    """UI two's recent activity: what happened to the stock, in plain words."""
+
+    def lines(self):
+        return [line["text"] for line in activity.recent(self.store, 10)]
+
+    def stocked(self, count=2):
+        operation = self.store.begin("load", 1, count, PRODUCT, self.actor)
+        self.store.access(operation, self.actor)
+        self.store.finish(operation, self.actor, closed=True)
+
+    def test_sessions_and_steps_within_an_operation_never_show(self):
+        self.assertEqual([], self.lines())  # the store's session started, and nothing has happened yet
+        operation = self.start_box()
+        self.assertEqual([], self.lines())  # requested, staged and unlocked, but not finished
+        self.complete(operation)
+        self.assertEqual([f"Loaded 1 bottle of {PRODUCT['generic_name']} into drawer 1"], self.lines())
+        text = " ".join(self.lines())
+        for hidden in ("local-workstation", "operator", "session", "compartment", "Closure"):
+            self.assertNotIn(hidden, text)
+
+    def test_dispensing_and_emptying_read_as_what_was_removed(self):
+        self.stocked()
+        operation = self.store.begin("dispense", 1, 1, {}, self.actor)
+        self.store.access(operation, self.actor)
+        self.store.verify_one(operation, self.actor)
+        self.store.finish(operation, self.actor, closed=True)
+        self.assertEqual(f"Dispensed 1 bottle of {PRODUCT['generic_name']} from drawer 1", self.lines()[0])
+        operation = self.store.begin("unload", 1, 0, {}, self.actor)
+        self.store.access(operation, self.actor)
+        self.store.finish(operation, self.actor, closed=True)
+        self.assertEqual(f"Emptied drawer 1 (1 bottle of {PRODUCT['generic_name']})", self.lines()[0])
+
+    def test_an_interruption_needs_attention_until_the_drawer_is_counted(self):
+        self.stocked()
+        operation = self.store.begin("dispense", 1, 1, {}, self.actor)
+        self.store.access(operation, self.actor)
+        self.store.cancel(operation, self.actor, "Cancelled after drawer access")
+        newest = activity.recent(self.store, 1)[0]
+        self.assertEqual(("Dispensing from drawer 1 was interrupted. It needs a count.", True), (newest["text"], newest["attention"]))
+        self.store.reconcile(operation, 2, self.actor, "Nothing taken", closed=True)
+        counted, interrupted = activity.recent(self.store, 2)
+        self.assertEqual(f"Counted drawer 1: 2 bottles of {PRODUCT['generic_name']}", counted["text"])
+        self.assertFalse(interrupted["attention"])
+
+    def test_unlocking_by_hand_shows_the_reason(self):
+        operation = self.store.begin("manual", 2, 0, {}, self.actor, "Inspect")
+        self.store.access(operation, self.actor)
+        self.store.cancel(operation, self.actor, "Manual inspection requires a count")
+        self.assertEqual("Drawer 2 was unlocked by hand (Inspect). It needs a count.", self.lines()[0])
+        self.store.reconcile(operation, 0, self.actor, "", closed=True)
+        self.assertEqual("Counted drawer 2: empty", self.lines()[0])
+
+    def test_a_drawer_that_did_not_unlock_is_one_line(self):
+        self.stocked()
+        operation = self.store.begin("dispense", 1, 1, {}, self.actor)
+        self.store.cancel(operation, self.actor, "Firmware did not acknowledge command 0: timeout", access_attempted=False)
+        self.assertEqual("Drawer 1 did not unlock, so nothing changed", self.lines()[0])
+        self.assertEqual(2, len(self.lines()))
+
+    def test_reopening_is_shown(self):
+        self.stocked()
+        operation = self.store.begin("dispense", 1, 1, {}, self.actor)
+        self.store.access(operation, self.actor)
+        self.store.note_reopen(operation, self.actor)
+        self.assertEqual("Drawer 1 unlocked again", self.lines()[0])
+
+    def test_times_show_their_day_unless_today(self):
+        now = datetime(2026, 11, 6, 15, 0).astimezone()
+        for moment, shown in ((now.replace(hour=9, minute=5), "09:05"), (now.replace(hour=9, minute=5) - timedelta(days=1), "Yesterday 09:05"),
+                              (now.replace(hour=9, minute=5) - timedelta(days=3), "3 Nov 09:05")):
+            with self.subTest(shown=shown):
+                self.assertEqual(shown, activity.when(moment.isoformat(), now))
+
+
 class CombinedTests(CombinedFixture):
+    def test_strength_is_read_from_the_catalog_for_display_only(self):
+        path = self.directory / "strengths.json"
+        path.write_text(json.dumps([
+            {"generic_name": "A", "active_ingredients": [{"strength": ".25 mg/1"}], "packaging": [{"package_ndc": "11111-111-11"}]},
+            {"generic_name": "B", "active_ingredients": [{"strength": "5 mg/1"}, {"strength": "325 mg/1"}], "packaging": [{"package_ndc": "22222-222-22"}]},
+            {"generic_name": "C", "active_ingredients": [{"strength": "10 mg/mL"}], "packaging": [{"package_ndc": "33333-333-33"}]},
+            {"generic_name": "D", "active_ingredients": [{"strength": "1 mg/1"}], "packaging": [{"package_ndc": "44444-444-44"}]},
+            {"generic_name": "D", "active_ingredients": [{"strength": "2 mg/1"}], "packaging": [{"package_ndc": "44444-444-44"}]},
+            {"generic_name": "E", "packaging": [{"package_ndc": "55555-555-55"}]}]))
+        catalog = Catalog(path)
+        for ndc, strength in (("11111-111-11", "0.25 mg"), ("22222-222-22", "5 mg / 325 mg"), ("33333-333-33", "10 mg/mL"),
+                              ("44444-444-44", ""), ("55555-555-55", ""), ("99999-999-99", ""), ("not an id", "")):
+            with self.subTest(ndc=ndc):
+                self.assertEqual(strength, catalog.strength(ndc))
+        self.assertNotIn("strength", catalog.loading_details("11111-111-11")[0])
+
     def test_gs1_maps_only_through_exact_catalog_aliases(self):
         self.assertEqual(PRODUCT["ndc"], self.catalog.lookup(barcode())["ndc"])
         self.assertTrue(self.catalog.matches(barcode(), PRODUCT["ndc"]))
@@ -290,6 +382,14 @@ class BrowserTests(CombinedFixture):
     def photo_downloads_finish(self):
         self.app.extensions["photos"].submit(lambda: None).result(timeout=5)  # queued behind them
 
+    def test_find_tells_a_new_package_from_a_stocked_one_and_a_bad_scan(self):
+        self.assertEqual([], self.post("/api/find", {"scan": PRODUCT["ndc"]}).json["drawers"])
+        self.complete(self.start_box())
+        self.assertEqual([1], self.post("/api/find", {"scan": PRODUCT["ndc"]}).json["drawers"])
+        self.assertEqual([], self.post("/api/find", {"scan": "9999999999"}).json["drawers"])
+        for scan in ("", "not a barcode"):
+            self.assertEqual(409, self.post("/api/find", {"scan": scan}).status_code)
+
     def test_state_downloads_a_missing_label_photo_in_the_background(self):
         release = threading.Event()
 
@@ -340,13 +440,24 @@ class BrowserTests(CombinedFixture):
         self.assertEqual(403, self.client.get("/api/state", headers={"Host":"untrusted.example"}).status_code)
         self.assertIsNone(self.hardware.selected)
 
+    def test_browser_unlock_without_reason_saves_entered_count(self):
+        self.complete(self.service.start("load", 1, 3, PRODUCT))
+        response = self.post("/api/start", {"kind": "manual", "drawer": 1})
+        self.assertEqual(200, response.status_code)
+        op = response.json["operation"]
+        self.assertEqual("", op["reason"])
+        response = self.post("/api/reconcile", {"operation": op["id"], "count": 5, "closed": True})
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(5, Store(self.path).compartments()[0]["quantity"])
+        self.assertIsNone(self.store.active())
+
     def test_bad_types_and_invalid_drawers_never_change_stock(self):
         for data in ({"kind":"load","drawer":True,"count":1,"product":PRODUCT},
                      {"kind":"load","drawer":5,"count":1,"product":PRODUCT},
                      {"kind":"load","drawer":1,"count":True,"product":PRODUCT},
                      {"kind":"load","drawer":1,"count":1,"product":[]},
                      {"kind":"manual","drawer":1,"reason":[]},
-                     {"kind":"manual","drawer":1,"reason":"", "unexpected":"x"}):
+                     {"kind":"manual","drawer":1,"reason":None}):
             with self.subTest(data=data):
                 self.assertEqual(409, self.post("/api/start", data).status_code)
         self.assertIsNone(self.store.active())
@@ -362,6 +473,36 @@ class BrowserTests(CombinedFixture):
         response = self.client.post("/api/catalog", data={"catalog":(io.BytesIO(b"{}"),"bad.json")}, headers={"X-Pharm-Token":self.token})
         self.assertEqual(409, response.status_code)
         self.assertIs(self.catalog, self.app.extensions["pharm"].catalog)
+
+    def test_page_starts_on_ui_two_in_dark_and_offers_light_and_the_legacy_ui(self):
+        page = self.client.get("/").get_data(as_text=True)
+        self.assertIn('<html lang="en" data-ui="two" data-theme="dark">', page)
+        self.assertIn(">Light theme</button>", page)
+        self.assertIn(">Switch to legacy UI</button>", page)
+        self.assertIn('localStorage.getItem("pharm-ui") === "one"', page)
+        self.assertIn('"pharm-ui-two-theme"', page)  # its theme is remembered apart from the legacy UI's
+
+    def test_stylesheet_has_a_light_theme_for_ui_two(self):
+        css = self.client.get("/cabinet.css").get_data(as_text=True)
+        self.assertIn(':root[data-ui="two"][data-theme="light"] {', css)
+        self.assertNotIn("#theme-button { display: none; }", css)
+
+    def test_state_carries_strength_and_the_newest_events_first(self):
+        path = self.directory / "strength.json"
+        path.write_text(json.dumps([{"generic_name": PRODUCT["generic_name"], "active_ingredients": [{"strength": "5 mg/1"}],
+                                     "packaging": [{"package_ndc": PRODUCT["ndc"]}]}]))
+        self.app.extensions["pharm"].catalog = Catalog(path)
+        self.complete(self.start_box())
+        state = self.client.get("/api/state").json
+        self.assertEqual(("5 mg", ""), (state["drawers"][0]["strength"], state["drawers"][1]["strength"]))
+        self.assertEqual([f"Loaded 1 bottle of {PRODUCT['generic_name']} into drawer 1"], [a["text"] for a in state["activity"]])
+        self.assertEqual({"when", "text", "attention"}, set(state["activity"][0]))
+        self.assertEqual("5 mg", self.post("/api/preview", {"scan": PRODUCT["ndc"]}).json["strength"])
+
+    def test_verify_reports_the_scanned_serial(self):
+        self.complete(self.start_box())
+        op = self.service.start("dispense", 1, 1)
+        self.assertEqual("BOX1", self.post("/api/verify", {"operation": op["id"], "scan": barcode()}).json["serial"])
 
     def test_audit_and_backup_are_downloadable(self):
         self.complete(self.start_box())

@@ -10,6 +10,10 @@ on the selected drawer. Rounded shapes are rasterized at startup with antialiase
 registered as nine-slice ttk image elements, so the theme needs no image files
 or third-party packages and stays crisp at any display scaling. Colors match
 UI/web/cabinet.css.
+
+UI two, the default, has its own two palettes, "console" (dark) and
+"console_light": every token here, the fonts and the corners change with
+them, so Theme.refresh() must follow a switch between any two palettes.
 """
 import math
 import tkinter as tk
@@ -46,6 +50,20 @@ TONES = {
     "danger": (DANGER_DARK, DANGER_SOFT, DANGER_LINE),
 }
 
+BRAND = ACCENT  # the window icon, the same in every palette
+FIELD = SURFACE  # inside an entry
+CAPTION = ACCENT_DARK  # small headings over a step
+URGENT = DANGER  # an expiration date that needs attention
+ROUNDING = 1  # 0 draws every shape square
+ENTRY_RING = "#ccfbf1"  # around a focused entry; None for no ring
+IDLE = SUBTLE  # UI two: a drawer column that is empty or waiting on another
+
+# What every palette but UI two's shares.
+_WORK = {name: globals()[name] for name in (
+    "SURFACE", "SUBTLE", "BG", "BORDER", "BORDER_STRONG", "TEXT", "TEXT_SOFT", "MUTED", "FAINT", "ACCENT", "ACCENT_DARK",
+    "ACCENT_SOFT", "ACCENT_LINE", "DANGER", "DANGER_DARK", "DANGER_SOFT", "DANGER_LINE", "WARNING", "WARNING_DARK",
+    "WARNING_SOFT", "WARNING_LINE", "TONES", "FIELD", "CAPTION", "URGENT", "ROUNDING", "ENTRY_RING", "IDLE")}
+
 # Shell palettes. use_palette() copies one into the module globals below, so
 # read them as T.SHELL etc. at draw time rather than binding them at import.
 #   HEADER*: the band across the top of the window.
@@ -80,8 +98,64 @@ PALETTES = {
         HEADER_FIELD=dict(fill="#222a37", outline="#364152", text="#f1f5f9", ring="#134e4a", hover="#8b98aa",
                           placeholder="#8b98aa"),
         DRAWER_TONES=None),
+    # UI two: grey is normal, amber is for what needs attention and blue is for
+    # the drawer being worked on. Matches the UI two section of cabinet.css.
+    # Its light palette below keeps those roles.
+    "console": dict(
+        SURFACE="#181c1f", SUBTLE="#20262a", BG="#20262a", BORDER="#2e353a", BORDER_STRONG="#3a4248", TEXT="#e6eaec",
+        TEXT_SOFT="#9aa5ac", MUTED="#9aa5ac", FAINT="#9aa5ac", ACCENT="#6ec1ff", ACCENT_DARK="#6ec1ff", ACCENT_SOFT="#14232e",
+        ACCENT_LINE="#2c5a7a", DANGER="#ff8a6b", DANGER_DARK="#ff8a6b", DANGER_SOFT="#2a1a16", DANGER_LINE="#6b3a2c",
+        WARNING="#ffb020", WARNING_DARK="#ffc65c", WARNING_SOFT="#2a2110", WARNING_LINE="#6b5220",
+        TONES={"accent": ("#6ec1ff", "#14232e", "#2c5a7a"), "warning": ("#ffc65c", "#2a2110", "#6b5220"),
+               "danger": ("#ff8a6b", "#2a1a16", "#6b3a2c")},
+        FIELD="#101315", CAPTION="#9aa5ac", URGENT="#ffb020", ROUNDING=0, ENTRY_RING=None, IDLE="#14181a",
+        HEADER="#101315", HEADER_TEXT="#e6eaec", HEADER_MUTED="#9aa5ac", HEADER_WARNING="#9aa5ac",
+        SHELL="#101315", SHELL_RAISED="#181c1f", SHELL_LINE="#2e353a", SHELL_TEXT="#e6eaec",
+        SHELL_MUTED="#9aa5ac", SHELL_WARNING="#ffb020", SHELL_DANGER="#ffb020", CARD_LINE="#2e353a",
+        SHELL_HOVER="#20262a", SHELL_SELECTED="#20262a",
+        LOGO=("#101315", "#e6eaec"),
+        HEADER_BUTTON=("#20262a", "#e6eaec", "#3a4248", "#2a3136", "#323a40", "#1c2125", "#9aa5ac", "#2e353a"),
+        HEADER_FIELD=dict(fill="#181c1f", outline="#181c1f", text="#e6eaec", ring="#181c1f", hover="#181c1f",
+                          placeholder="#9aa5ac", under="#181c1f", focused="#181c1f"),
+        DRAWER_TONES=None,
+        BUTTONS={
+            "Primary": ("#e6eaec", "#101315", None, "#ffffff", "#c9d0d4", "#3a4248", "#9aa5ac", None),
+            "Secondary": ("#20262a", "#e6eaec", "#3a4248", "#2a3136", "#323a40", "#1c2125", "#9aa5ac", "#2e353a"),
+            "Danger": ("#ff8a6b", "#101315", None, "#ffa78f", "#ff7350", "#6b3a2c", "#9aa5ac", None),
+            "Warning": ("#ffb020", "#101315", None, "#ffc65c", "#e89c10", "#6b5220", "#9aa5ac", None),
+            "Ghost": (None, "#e6eaec", None, "#20262a", "#2a3136", None, "#9aa5ac", None),
+        }),
+    "console_light": dict(
+        SURFACE="#ffffff", SUBTLE="#f3f5f6", BG="#f3f5f6", BORDER="#d5dadd", BORDER_STRONG="#b4bcc1", TEXT="#14181a",
+        TEXT_SOFT="#5b666d", MUTED="#5b666d", FAINT="#5b666d", ACCENT="#0b64c0", ACCENT_DARK="#0b64c0", ACCENT_SOFT="#e6f0fa",
+        ACCENT_LINE="#9cc3ea", DANGER="#b93c0c", DANGER_DARK="#b93c0c", DANGER_SOFT="#fbeee9", DANGER_LINE="#eab8a6",
+        WARNING="#9a5b00", WARNING_DARK="#7a4800", WARNING_SOFT="#fdf3e1", WARNING_LINE="#e8c886",
+        TONES={"accent": ("#0b64c0", "#e6f0fa", "#9cc3ea"), "warning": ("#7a4800", "#fdf3e1", "#e8c886"),
+               "danger": ("#b93c0c", "#fbeee9", "#eab8a6")},
+        FIELD="#ffffff", CAPTION="#5b666d", URGENT="#9a5b00", ROUNDING=0, ENTRY_RING=None, IDLE="#f5f7f8",
+        HEADER="#eef1f3", HEADER_TEXT="#14181a", HEADER_MUTED="#5b666d", HEADER_WARNING="#5b666d",
+        SHELL="#eef1f3", SHELL_RAISED="#ffffff", SHELL_LINE="#d5dadd", SHELL_TEXT="#14181a",
+        SHELL_MUTED="#5b666d", SHELL_WARNING="#9a5b00", SHELL_DANGER="#9a5b00", CARD_LINE="#d5dadd",
+        SHELL_HOVER="#f3f5f6", SHELL_SELECTED="#f3f5f6",
+        LOGO=("#eef1f3", "#14181a"),
+        HEADER_BUTTON=("#ffffff", "#14181a", "#b4bcc1", "#e9edef", "#dde2e5", "#f3f5f6", "#8a949a", "#d5dadd"),
+        HEADER_FIELD=dict(fill="#ffffff", outline="#ffffff", text="#14181a", ring="#ffffff", hover="#ffffff",
+                          placeholder="#5b666d", under="#ffffff", focused="#ffffff"),
+        DRAWER_TONES=None,
+        BUTTONS={
+            "Primary": ("#14181a", "#ffffff", None, "#2e353a", "#3a4248", "#d5dadd", "#6b767c", None),
+            "Secondary": ("#f3f5f6", "#14181a", "#b4bcc1", "#e9edef", "#dde2e5", "#f8f9fa", "#8a949a", "#d5dadd"),
+            "Danger": ("#b93c0c", "#ffffff", None, "#a0330a", "#8a2c08", "#eab8a6", "#ffffff", None),
+            "Warning": ("#9a5b00", "#ffffff", None, "#7a4800", "#663c00", "#e8c886", "#ffffff", None),
+            "Ghost": (None, "#14181a", None, "#f3f5f6", "#e9edef", None, "#8a949a", None),
+        }),
 }
 PALETTE = "light"
+# UI two's palettes, its default (dark) first. The legacy UI has "light" and "dark".
+CONSOLE = ("console", "console_light")
+# Each palette's other theme within the same UI, and whether it is the dark one.
+OTHER_THEME = {"light": "dark", "dark": "light", "console": "console_light", "console_light": "console"}
+DARK_PALETTES = ("dark", "console")
 
 
 def use_palette(name):
@@ -92,6 +166,7 @@ def use_palette(name):
     if name not in PALETTES:
         raise ValueError(f"Unknown palette: {name}")
     PALETTE = name
+    globals().update(_WORK)
     globals().update(PALETTES[name])
 
 
@@ -99,6 +174,9 @@ use_palette(PALETTE)
 
 _UI_FAMILIES = ("Segoe UI", "SF Pro Text", "Helvetica Neue", "Inter", "Noto Sans", "Cantarell", "DejaVu Sans")
 _MONO_FAMILIES = ("Consolas", "Cascadia Mono", "SF Mono", "Menlo", "Noto Sans Mono", "DejaVu Sans Mono")
+_CONSOLE_FAMILIES = ("Bahnschrift SemiCondensed", "Barlow Semi Condensed", "Bahnschrift")
+_CONSOLE_STRONG = ("Bahnschrift SemiBold SemiConden", "Barlow Semi Condensed SemiBold")
+_CONSOLE_MONO = ("Cascadia Mono", "Consolas")
 
 # Point sizes; Tk converts them using the display's real DPI.
 _FONTS = {
@@ -106,6 +184,12 @@ _FONTS = {
     "body": ("ui", 12), "strong": ("strong", 12), "small": ("ui", 11), "caption": ("strong", 10),
     "metric": ("strong", 32), "number": ("strong", 26), "button": ("strong", 12), "button_lg": ("strong", 14),
     "link": ("strong", 12), "input": ("ui", 13), "mono": ("mono", 12), "scan": ("mono", 15),
+    "count": ("mono", 50), "tile_count": ("mono", 28), "drawer_name": ("strong", 16), "mono_small": ("mono", 11),
+}
+# UI two's sizes, where they differ.
+_CONSOLE_FONTS = {
+    "display": ("strong", 22), "prompt": ("strong", 22), "heading": ("strong", 13), "body": ("ui", 12), "small": ("ui", 11),
+    "number": ("mono", 24), "button": ("strong", 13), "button_lg": ("strong", 13), "link": ("strong", 12), "scan": ("mono", 12),
 }
 
 _BUTTONS = {
@@ -116,21 +200,48 @@ _BUTTONS = {
     "Warning": (WARNING, "#ffffff", None, WARNING_DARK, "#78350f", "#e5b98f", "#ffffff", None),
     "Ghost": (None, ACCENT_DARK, None, ACCENT_SOFT, "#ccfbf1", None, FAINT, None),
 }
+BUTTONS = _WORK["BUTTONS"] = _BUTTONS
 
-_UNDER_NAMES = {SURFACE: "", SUBTLE: "OnSubtle", WARNING_SOFT: "OnWarning", DANGER_SOFT: "OnDanger",
+_UNDER_NAMES ={SURFACE: "", SUBTLE: "OnSubtle", WARNING_SOFT: "OnWarning", DANGER_SOFT: "OnDanger",
                 ACCENT_SOFT: "OnAccent"}
+
+
+def console():
+    """Whether UI two is showing, in either theme."""
+    return PALETTE in CONSOLE
+
+
+def dark():
+    """Whether the showing UI is in its dark theme."""
+    return PALETTE in DARK_PALETTES
+
+
+def caps(text):
+    """Control and heading text as the current UI writes it."""
+    return text.upper() if console() else text
 
 
 def _rgb(color):
     return tuple(int(color[i:i + 2], 16) for i in (1, 3, 5))
 
 
+def _name():
+    """The palette's name as ttk style names carry it."""
+    return PALETTE.title().replace("_", "")
+
+
+def _variant():
+    """A style-name prefix for UI two's palettes, whose work surface differs from
+    the legacy UI's, so a style drawn in one palette is never reused in another."""
+    return _name() if console() else ""
+
+
 def _suffix(under):
     if under == SHELL:
-        return "OnShell" + PALETTE.title()
+        return "OnShell" + _name()
     if under == HEADER:
-        return "OnHeader" + PALETTE.title()
-    return _UNDER_NAMES.get(under, "On" + under[1:])
+        return "OnHeader" + _name()
+    return _variant() + _UNDER_NAMES.get(under, "On" + under[1:])
 
 
 def _distance(box, radius):
@@ -234,17 +345,39 @@ class Theme:
     def font(self, name):
         return self.fonts[name]
 
-    def _create_fonts(self):
+    def _font_options(self):
+        """The default family, and each named font's options in this palette."""
         families = set(tkfont.families(self.root))
         ui = next((f for f in _UI_FAMILIES if f in families), "Helvetica")
         mono = next((f for f in _MONO_FAMILIES if f in families), "Courier")
         strong = ("Segoe UI Semibold", "normal") if ui == "Segoe UI" and "Segoe UI Semibold" in families else (ui, "bold")
+        sizes = _FONTS
+        if console():
+            ui = next((f for f in _CONSOLE_FAMILIES if f in families), ui)
+            mono = next((f for f in _CONSOLE_MONO if f in families), mono)
+            heavy = next((f for f in _CONSOLE_STRONG if f in families), None)
+            strong = (heavy, "normal") if heavy else (ui, "bold")
+            sizes = {**_FONTS, **_CONSOLE_FONTS}
         kinds = {"ui": (ui, "normal"), "strong": strong, "mono": (mono, "normal")}
-        fonts = {name: tkfont.Font(self.root, family=kinds[kind][0], size=size, weight=kinds[kind][1])
-                 for name, (kind, size) in _FONTS.items()}
+        return ui, {name: dict(family=kinds[kind][0], size=size, weight=kinds[kind][1]) for name, (kind, size) in sizes.items()}
+
+    def _create_fonts(self):
+        ui, options = self._font_options()
+        fonts = {name: tkfont.Font(self.root, **option) for name, option in options.items()}
         for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
             tkfont.nametofont(name, root=self.root).configure(family=ui, size=11)
         return fonts
+
+    def refresh(self):
+        """Follow a switch of palette. Fonts change in place; the caller
+        rebuilds the window for its colors."""
+        ui, options = self._font_options()
+        for name, option in options.items():
+            self.fonts[name].configure(**option)
+        for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
+            tkfont.nametofont(name, root=self.root).configure(family=ui)
+        self.root.configure(bg=SHELL)
+        self._configure()
 
     # -- Rasterized shapes -------------------------------------------------
 
@@ -253,9 +386,9 @@ class Theme:
 
         `stripe` paints a colored bar inside the left edge, clipped to the
         rounded shape; it sits within the fixed left border so it never tiles."""
-        key = ("surface", fill, radius, under, outline, line, ring, stripe)
+        key = ("surface", fill, radius, under, outline, line, ring, stripe, ROUNDING)
         if key not in self.images:
-            r = self.px(radius)
+            r = self.px(radius) * ROUNDING
             margin = self.px(3) if ring else 0
             size = 2 * (r + margin) + 3
             box = (margin, margin, size - margin, size - margin)
@@ -305,12 +438,13 @@ class Theme:
                                   *[(spec, str(image)) for spec, image in states],
                                   border=border, padding=0, sticky="nsew", **size)
 
-    def button_style(self, kind="Secondary", under=SURFACE, large=False):
+    def button_style(self, kind="Secondary", under=None, large=False):
+        under = SURFACE if under is None else under
         name = f"{kind}{'Large' if large else ''}{_suffix(under)}.TButton"
         if name in self.styles:
             return name
         fill, text, outline, hover, pressed, dis_fill, dis_text, dis_outline = (
-            HEADER_BUTTON if kind == "Header" else _BUTTONS[kind])
+            HEADER_BUTTON if kind == "Header" else BUTTONS[kind])
         fill, dis_fill = fill or under, dis_fill or under
         radius = 10 if large else 8
 
@@ -328,9 +462,9 @@ class Theme:
         if kind == "Ghost":
             padding, font = (self.px(10), self.px(6)), "link"
         elif large:
-            padding, font = (self.px(28), self.px(14)), "button_lg"
+            padding, font = (self.px(20 if console() else 28), self.px(14)), "button_lg"
         else:
-            padding, font = (self.px(18), self.px(9)), "button"
+            padding, font = (self.px(9), self.px(13)) if console() else (self.px(18), self.px(9)), "button"
         # width=0 sizes buttons to their label instead of clam's 11-character minimum.
         self.style.configure(name, font=self.font(font), foreground=text, padding=padding, anchor="center", width=0)
         self.style.map(name, foreground=[("disabled", dis_text)])
@@ -340,6 +474,7 @@ class Theme:
     def frame_style(self, name, fill, under, outline=None, radius=12, line=1, stripe=None):
         """A rounded ttk.Frame style. ttk frames ignore element padding, so
         callers pass `padding=` on the widget."""
+        name = _variant() + name
         if name not in self.styles:
             image, border = self.surface(fill, radius, under, outline=outline, line=line, stripe=stripe)
             self._element(name + ".surface", [image], border)
@@ -359,30 +494,38 @@ class Theme:
         stocked, open); otherwise the selected front gets an accent outline."""
         edge = DRAWER_TONES[tone][0] if DRAWER_TONES else None
         outline, line = (edge or ACCENT, 2) if state == "selected" else (CARD_LINE, 1)
-        name = f"Front{state.title()}{tone.title()}{PALETTE.title()}.TFrame"
+        name = f"Front{state.title()}{tone.title()}{_name()}.TFrame"
         return self.frame_style(name, self.front_fill(state, tone), SHELL, outline=outline, radius=14, line=line,
                                 stripe=edge)
 
-    def banner(self, parent, tone, under=SURFACE):
+    def banner(self, parent, tone, under=None):
+        under = SURFACE if under is None else under
         text, soft, line = TONES[tone]
         style = self.frame_style(f"Banner{tone.title()}{_suffix(under)}.TFrame", soft, under, outline=line, radius=12)
         return ttk.Frame(parent, style=style, padding=(self.px(20), self.px(16)))
 
-    def entry_style(self, name, under=SURFACE, fill=SURFACE, outline=BORDER_STRONG, text=TEXT, ring="#ccfbf1",
-                    hover=FAINT):
+    def entry_style(self, name, under=None, fill=None, outline=None, text=None, ring=None, hover=None, focused=None,
+                    padding=(14, 10)):
+        name = _variant() + name
         if name in self.styles:
             return name
+        under = SURFACE if under is None else under
+        fill = FIELD if fill is None else fill
+        outline = BORDER_STRONG if outline is None else outline
+        text = TEXT if text is None else text
+        ring = (ENTRY_RING or under) if ring is None else ring
+        hover = FAINT if hover is None else hover
         radius = 10
 
         def shape(fill_color, outline_color, ring_color=under):
             return self.surface(fill_color, radius, under, outline=outline_color, ring=ring_color)
         normal, border = shape(fill, outline)
-        states = [("disabled", shape(fill, outline)[0]), ("focus", shape(fill, ACCENT, ring)[0]),
+        states = [("disabled", shape(fill, outline)[0]), ("focus", shape(fill, ACCENT if focused is None else focused, ring)[0]),
                   ("hover", shape(fill, hover)[0])]
         self._element(name + ".field", [normal, *states], border)
         self.style.layout(name, [(name + ".field", {"sticky": "nsew", "children": [
             ("Entry.padding", {"sticky": "nsew", "children": [("Entry.textarea", {"sticky": "nsew"})]})]})])
-        self.style.configure(name, padding=(self.px(14), self.px(10)), foreground=text, insertcolor=text,
+        self.style.configure(name, padding=tuple(self.px(p) for p in padding), foreground=text, insertcolor=text,
                              selectbackground=ACCENT_LINE, selectforeground=TEXT, insertwidth=max(1, self.px(1.5)))
         self.style.map(name, foreground=[("disabled", FAINT)])
         self.styles.add(name)
@@ -390,48 +533,56 @@ class Theme:
 
     def panel_style(self):
         """The white work panel on the shell."""
-        return self.frame_style(f"Panel{PALETTE.title()}.TFrame", SURFACE, SHELL, outline=CARD_LINE, radius=16)
+        return self.frame_style(f"Panel{_name()}.TFrame", SURFACE, SHELL, outline=CARD_LINE, radius=16)
 
     def header_entry_style(self):
         """The scan field in the header band."""
-        field = {k: v for k, v in HEADER_FIELD.items() if k != "placeholder"}
-        return self.entry_style(f"Header{PALETTE.title()}.TEntry", under=HEADER, **field)
+        field = {"under": HEADER, **{k: v for k, v in HEADER_FIELD.items() if k != "placeholder"}}
+        return self.entry_style(f"Header{_name()}.TEntry", **field)
 
-    def _check_style(self):
+    def check_style(self):
+        prefix = _variant() + "Check"
+        name = prefix + ".TCheckbutton"
+        if name in self.styles:
+            return name
         size = self.px(22)
         gap = self.px(12)
 
         def box(fill, outline, mark=False):
-            r = self.px(6)
+            r = self.px(6) * ROUNDING
             layers = [(rounded((0.5, 0.5, size - 0.5, size - 0.5), r), outline)]
-            layers.append((rounded((1.5, 1.5, size - 1.5, size - 1.5), r - 1), fill))
+            layers.append((rounded((1.5, 1.5, size - 1.5, size - 1.5), max(r - 1, 0)), fill))
             if mark:
                 points = [(size * 0.27, size * 0.52), (size * 0.44, size * 0.68), (size * 0.74, size * 0.34)]
-                layers.append((_stroke(points, max(1.6, size * 0.11)), "#ffffff"))
+                layers.append((_stroke(points, max(1.6, size * 0.11)), SHELL if console() else "#ffffff"))
             return raster(size + gap, size, layers, SURFACE)
         images = [box(SURFACE, BORDER_STRONG),
                   ("disabled", box(SUBTLE, BORDER)),
                   ("selected", box(ACCENT, ACCENT, True)),
                   ("active", box(SURFACE, ACCENT))]
         for spec, image in images[1:]:
-            self.images[("check", spec)] = image
-        self.images[("check", "normal")] = images[0]
-        self._element("Check.indicator", images, 0)
-        self.style.layout("Check.TCheckbutton", [("Checkbutton.padding", {"sticky": "nsew", "children": [
-            ("Check.indicator", {"side": "left", "sticky": ""}),
+            self.images[(prefix, spec)] = image
+        self.images[(prefix, "normal")] = images[0]
+        self._element(prefix + ".indicator", images, 0)
+        self.style.layout(name, [("Checkbutton.padding", {"sticky": "nsew", "children": [
+            (prefix + ".indicator", {"side": "left", "sticky": ""}),
             ("Checkbutton.label", {"side": "left", "sticky": "nsew"})]})])
-        self.style.configure("Check.TCheckbutton", background=SURFACE, foreground=TEXT, font=self.font("body"),
+        self.style.configure(name, background=SURFACE, foreground=TEXT, font=self.font("body"),
                              padding=(0, self.px(8)), wraplength=self.px(520))
-        self.style.map("Check.TCheckbutton", background=[("active", SURFACE)], foreground=[("disabled", FAINT)])
+        self.style.map(name, background=[("active", SURFACE)], foreground=[("disabled", FAINT)])
+        self.styles.add(name)
+        return name
 
-    def scrollbar_style(self, under=SURFACE):
+    def scrollbar_style(self, under=None):
+        under = SURFACE if under is None else under
         prefix = "Slim" + _suffix(under)
         name = prefix + ".Vertical.TScrollbar"
         if name in self.styles:
             return name
         width, radius = self.px(12), self.px(4)
         size = 2 * radius + 3
-        rest, active = ("#d5dae1", FAINT) if under != SHELL else (SHELL_LINE, SHELL_MUTED)
+        rest = BORDER_STRONG if console() else "#d5dae1"
+        rest, active = (rest, FAINT) if under != SHELL else (SHELL_LINE, SHELL_MUTED)
 
         def thumb(color):
             x0 = (width - 2 * radius) / 2
@@ -456,15 +607,15 @@ class Theme:
         style.configure("TLabel", background=SURFACE, foreground=TEXT)
         # Unstyled buttons and entries still match the design.
         self.button_style("Primary")
-        self.button_style("Secondary")
-        style.layout("TButton", style.layout("Secondary.TButton"))
-        style.configure("TButton", **{k: style.lookup("Secondary.TButton", k) for k in ("font", "foreground", "padding", "anchor", "width")})
+        secondary = self.button_style("Secondary")
+        style.layout("TButton", style.layout(secondary))
+        style.configure("TButton", **{k: style.lookup(secondary, k) for k in ("font", "foreground", "padding", "anchor", "width")})
         style.map("TButton", foreground=[("disabled", FAINT)])
-        self.entry_style("Field.TEntry")
-        style.layout("TEntry", style.layout("Field.TEntry"))
-        style.configure("TEntry", **{k: style.lookup("Field.TEntry", k) for k in
+        field = self.entry_style("Field.TEntry", padding=(10, 8) if console() else (14, 10))
+        style.layout("TEntry", style.layout(field))
+        style.configure("TEntry", **{k: style.lookup(field, k) for k in
                                      ("padding", "foreground", "insertcolor", "selectbackground", "selectforeground", "insertwidth")})
-        self._check_style()
+        self.check_style()
         self.scrollbar_style(SURFACE)
         style.configure("TCombobox", fieldbackground=SURFACE, background=SURFACE, foreground=TEXT,
                         bordercolor=BORDER_STRONG, lightcolor=SURFACE, darkcolor=SURFACE, arrowcolor=MUTED,
